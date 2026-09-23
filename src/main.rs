@@ -8,6 +8,7 @@ use ratatui::crossterm::event::Event;
 use ratatui::crossterm::event::KeyCode;
 use ratatui::crossterm::event::KeyEvent;
 use ratatui::crossterm::event::KeyEventKind;
+use ratatui::crossterm::event::KeyModifiers;
 use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
 use ratatui::text::Line;
@@ -118,10 +119,24 @@ fn get_message() -> anyhow::Result<Option<Message>> {
 }
 
 fn key_to_message(key: KeyEvent) -> Option<Message> {
-    match key.code {
-        KeyCode::Left => Some(Message::Prev),
-        KeyCode::Right => Some(Message::Next),
-        KeyCode::Char('q') => Some(Message::Quit),
+    match key {
+        KeyEvent {
+            code: KeyCode::Left,
+            ..
+        } => Some(Message::Prev),
+        KeyEvent {
+            code: KeyCode::Right,
+            ..
+        } => Some(Message::Next),
+        KeyEvent {
+            code: KeyCode::Char('q'),
+            ..
+        }
+        | KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        } => Some(Message::Quit),
         _ => None,
     }
 }
