@@ -1,5 +1,6 @@
 use std::{
     env::current_dir,
+    ffi::OsStr,
     fs::{self, DirEntry},
 };
 
@@ -24,5 +25,12 @@ fn get_current_dir_files() -> Vec<DirEntry> {
         .unwrap()
         .unwrap()
         .map(Result::unwrap)
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .and_then(OsStr::to_str)
+                .is_some_and(|ext| ext == "mp4")
+        })
         .collect()
 }

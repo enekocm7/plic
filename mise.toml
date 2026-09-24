@@ -1,0 +1,13 @@
+[tasks.run]
+alias = "r"
+description = "Compiles the app and runs it in the clips directory"
+run = [
+    "cargo build --release",
+    "mv target/release/plic clips/plic",
+    "cd clips && ./plic"
+]
+run_windows = [
+    "cargo build --release",
+    "move .\\target\\release\\plic.exe .\\clips\\plic.exe",
+    "cd clips && .\\plic.exe"
+]
