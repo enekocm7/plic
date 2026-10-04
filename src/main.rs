@@ -128,11 +128,14 @@ fn draw(model: &Model, f: &mut Frame) {
         })
         .render(rows[5], buf);
 
+    let end_value = clip.end.value();
     let clip_length = match (
         parse_timestamp(&clip.start.value()),
-        parse_timestamp(&clip.end.value()),
+        end_value.trim().is_empty(),
+        parse_timestamp(&end_value),
     ) {
-        (Some(start), Some(end)) if end > start => {
+        (Some(_), true, _) => "Selected duration: until the end of the video".to_owned(),
+        (Some(start), false, Some(end)) if end > start => {
             format!("Selected duration: {}", format_timestamp(end - start))
         }
         _ => "Selected duration: enter a valid start and end".to_owned(),
@@ -312,14 +315,19 @@ fn start_export(model: &mut Model) {
         model.status = "Start must use MM:SS or HH:MM:SS, for example 2:30".to_owned();
         return;
     };
-    let Some(end_seconds) = parse_timestamp(&end_text) else {
-        model.status = "End must use MM:SS or HH:MM:SS, for example 4:21".to_owned();
-        return;
+    let end_seconds = if end_text.is_empty() {
+        None
+    } else {
+        let Some(seconds) = parse_timestamp(&end_text) else {
+            model.status = "End must use MM:SS or HH:MM:SS, for example 4:21".to_owned();
+            return;
+        };
+        if seconds <= start_seconds {
+            model.status = "End time must be later than start time".to_owned();
+            return;
+        }
+        Some(seconds)
     };
-    if end_seconds <= start_seconds {
-        model.status = "End time must be later than start time".to_owned();
-        return;
-    }
 
     let output = folder.join(format!("{name}.mp4"));
     if output.exists() {
@@ -327,8 +335,9 @@ fn start_export(model: &mut Model) {
         return;
     }
 
-    let duration = format_timestamp(end_seconds - start_seconds);
-    model.start_export(source, output, start_text, duration);
+    let start = (start_seconds > 0).then_some(start_text);
+    let duration = end_seconds.map(|end| format_timestamp(end - start_seconds));
+    model.start_export(source, output, start, duration);
 }
 
 fn valid_file_stem(name: &str) -> bool {

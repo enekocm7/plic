@@ -155,8 +155,8 @@ impl Model {
         &mut self,
         source: PathBuf,
         output: PathBuf,
-        start: String,
-        duration: String,
+        start: Option<String>,
+        duration: Option<String>,
     ) {
         let sender = self.export_tx.clone();
         self.exporting = Some(source.clone());
@@ -164,7 +164,7 @@ impl Model {
         self.status = format!("Exporting {}…", source.file_name().unwrap_or_default().to_string_lossy());
 
         std::thread::spawn(move || {
-            let result = crate::ffmpeg::export(&source, &output, &start, &duration)
+            let result = crate::ffmpeg::export(&source, &output, start.as_deref(), duration.as_deref())
                 .map(|()| output)
                 .map_err(|error| format!("{error:#}"));
             let _ = sender.send(ExportResult { source, result });

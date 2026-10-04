@@ -10,16 +10,28 @@ use anyhow::{Context, Result, bail};
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
-pub fn export(input: &Path, output: &Path, start: &str, duration: &str) -> Result<()> {
+pub fn export(
+    input: &Path,
+    output: &Path,
+    start: Option<&str>,
+    duration: Option<&str>,
+) -> Result<()> {
     if output.exists() {
         bail!("{} already exists", output.display());
     }
     let temporary = create_temp_path(output)?;
 
-    let result = Command::new("ffmpeg")
-        .args(["-hide_banner", "-loglevel", "error", "-y", "-ss", start, "-i"])
-        .arg(input)
-        .args(["-t", duration, "-c:v", "libx264", "-preset", "fast", "-crf", "20"])
+    let mut command = Command::new("ffmpeg");
+    command.args(["-hide_banner", "-loglevel", "error", "-y"]);
+    if let Some(start) = start {
+        command.args(["-ss", start]);
+    }
+    command.arg("-i").arg(input);
+    if let Some(duration) = duration {
+        command.args(["-t", duration]);
+    }
+    let result = command
+        .args(["-c:v", "libx264", "-preset", "fast", "-crf", "20"])
         .args(["-c:a", "aac", "-b:a", "192k"])
         .arg(&temporary)
         .output();
