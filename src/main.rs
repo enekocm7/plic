@@ -61,6 +61,7 @@ fn draw(model: &Model, f: &mut Frame) {
         Constraint::Min(1),
         Constraint::Length(1),
         Constraint::Length(1),
+        Constraint::Length(1),
     ])
     .split(inner);
 
@@ -71,8 +72,8 @@ fn draw(model: &Model, f: &mut Frame) {
         Line::from("Create or move .mp4 files here, then restart plic")
             .centered()
             .render(rows[1], buf);
-        Line::from("q: quit").render(rows[8], buf);
-        Line::from(model.status.as_str()).render(rows[9], buf);
+        Line::from(model.status.as_str()).render(rows[8], buf);
+        Line::from("q: quit").render(rows[10], buf);
         return;
     }
 
@@ -156,8 +157,8 @@ fn draw(model: &Model, f: &mut Frame) {
     } else {
         "←/→ clips · e edit · o open in default app · q quit"
     };
-    Line::from(help).render(rows[8], buf);
-    Line::from(model.status.as_str()).render(rows[9], buf);
+    Line::from(model.status.as_str()).render(rows[8], buf);
+    Line::from(help).render(rows[10], buf);
 }
 
 fn draw_input(
