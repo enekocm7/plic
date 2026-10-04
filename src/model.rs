@@ -64,6 +64,8 @@ impl Clip {
     }
 }
 
+const EDITED_DIR: &str = "edited";
+
 #[derive(Debug)]
 pub struct ExportResult {
     pub source: PathBuf,
@@ -97,7 +99,9 @@ impl Model {
                 .file_type()
                 .with_context(|| format!("could not inspect {}", entry.path().display()))?;
             if kind.is_dir() {
-                folders.push(entry.path());
+                if entry.file_name() != EDITED_DIR {
+                    folders.push(entry.path());
+                }
             } else if kind.is_file()
                 && entry
                     .path()
@@ -175,8 +179,12 @@ impl Model {
         self.exporting = None;
         match result.result {
             Ok(output) => {
+                let archived = archive_original(&result.source);
                 if let Some(clip) = self.clips.iter_mut().find(|clip| clip.path == result.source) {
                     clip.exported = true;
+                    if let Ok(path) = &archived {
+                        clip.path = path.clone();
+                    }
                 }
 
                 let was_on_exported_clip = self
@@ -195,6 +203,9 @@ impl Model {
                 } else {
                     self.status = format!("Saved {}", output.display());
                 }
+                if let Err(error) = archived {
+                    self.status = format!("{}; could not move original: {error:#}", self.status);
+                }
             }
             Err(error) => {
                 self.status = format!("Export failed: {error}");
@@ -205,6 +216,21 @@ impl Model {
     pub fn folder_for(&self, clip: &Clip) -> Option<&Path> {
         self.folders.get(clip.folder_index).map(PathBuf::as_path)
     }
+}
+
+fn archive_original(source: &Path) -> Result<PathBuf> {
+    let parent = source.parent().unwrap_or_else(|| Path::new("."));
+    let name = source.file_name().context("source has no file name")?;
+    let directory = parent.join(EDITED_DIR);
+    fs::create_dir_all(&directory)
+        .with_context(|| format!("could not create {}", directory.display()))?;
+    let destination = directory.join(name);
+    if destination.exists() {
+        anyhow::bail!("{} already exists", destination.display());
+    }
+    fs::rename(source, &destination)
+        .with_context(|| format!("could not move to {}", destination.display()))?;
+    Ok(destination)
 }
 
 fn next_unexported(clips: &[Clip], selected: usize) -> Option<usize> {
