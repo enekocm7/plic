@@ -65,6 +65,8 @@ fn draw(model: &Model, f: &mut Frame) {
     ])
     .split(inner);
 
+    draw_queue(model, rows[7], buf);
+
     if model.clips.is_empty() {
         Line::from("No .mp4 files in this directory")
             .centered()
@@ -80,12 +82,12 @@ fn draw(model: &Model, f: &mut Frame) {
     let clip = model
         .current()
         .expect("selected clip exists when the list is nonempty");
-    let done = model.clips.iter().filter(|clip| clip.exported).count();
+    let done = model.removed + model.clips.iter().filter(|clip| clip.exported).count();
     Line::from(format!(
         "Clip {}/{} · exported {done}/{}",
         model.selected + 1,
         model.clips.len(),
-        model.clips.len()
+        model.removed + model.clips.len()
     ))
     .render(rows[0], buf);
     Line::from(format!("Source: {}", display_name(&clip.path))).render(rows[1], buf);
@@ -143,15 +145,6 @@ fn draw(model: &Model, f: &mut Frame) {
     };
     Line::from(clip_length).render(rows[6], buf);
 
-    if let Some(source) = &model.exporting {
-        Line::from(format!(
-            "Exporting {} in the background…",
-            display_name(source)
-        ))
-        .style(Style::default().fg(Color::Yellow))
-        .render(rows[7], buf);
-    }
-
     let help = if model.editing {
         "Tab fields · ↑/↓ folders · Enter export · Ctrl+A clear · Esc browse · Ctrl+C quit"
     } else {
@@ -159,6 +152,33 @@ fn draw(model: &Model, f: &mut Frame) {
     };
     Line::from(model.status.as_str()).render(rows[8], buf);
     Line::from(help).render(rows[10], buf);
+}
+
+fn draw_queue(model: &Model, area: ratatui::layout::Rect, buf: &mut ratatui::buffer::Buffer) {
+    let height = usize::from(area.height);
+    if model.jobs.is_empty() || height == 0 {
+        return;
+    }
+    let shown = model.jobs.len().min(height);
+    let hidden = model.jobs.len() - shown;
+    let mut lines: Vec<String> = model
+        .jobs
+        .iter()
+        .take(shown)
+        .map(|job| format!("Exporting {}…", job.name))
+        .collect();
+    if hidden > 0 {
+        // Replace the last visible line so the total never exceeds the area.
+        lines[shown - 1] = format!("Exporting {} clips…", hidden + 1);
+    }
+    let top = area.y + area.height - lines.len() as u16;
+    for (index, text) in lines.into_iter().enumerate() {
+        let row = ratatui::layout::Rect::new(area.x, top + index as u16, area.width, 1);
+        Line::from(text)
+            .style(Style::default().fg(Color::Yellow))
+            .right_aligned()
+            .render(row, buf);
+    }
 }
 
 fn draw_input(
@@ -253,7 +273,15 @@ fn update(model: &mut Model, msg: Message) -> bool {
         }
         Message::Export => start_export(model),
         Message::ExportFinished(result) => model.finish_export(result),
-        Message::Quit => return false,
+        Message::Quit => {
+            if model.jobs.is_empty() {
+                return false;
+            }
+            model.status = format!(
+                "{} export(s) still running; wait for them to finish before quitting",
+                model.jobs.len()
+            );
+        }
     }
 
     true
@@ -295,15 +323,14 @@ fn move_folder(model: &mut Model, forward: bool) {
 }
 
 fn start_export(model: &mut Model) {
-    if model.exporting.is_some() {
-        model.status = "An export is already running".to_owned();
-        return;
-    }
-
     let Some(clip) = model.current() else {
         return;
     };
     let source = clip.path.clone();
+    if model.is_exporting(&source) {
+        model.status = "This clip is already being exported".to_owned();
+        return;
+    }
     let name = clip.name.value().trim().to_owned();
     let start_text = clip.start.value().trim().to_owned();
     let end_text = clip.end.value().trim().to_owned();
@@ -335,14 +362,14 @@ fn start_export(model: &mut Model) {
     };
 
     let output = folder.join(format!("{name}.mp4"));
-    if output.exists() {
+    if output.exists() || model.output_in_use(&output) {
         model.status = format!("{} already exists; choose another name", output.display());
         return;
     }
 
     let start = (start_seconds > 0).then_some(start_text);
     let duration = end_seconds.map(|end| format_timestamp(end - start_seconds));
-    model.start_export(source, output, start, duration);
+    model.start_export(source, output, name, start, duration);
 }
 
 fn valid_file_stem(name: &str) -> bool {

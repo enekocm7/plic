@@ -73,6 +73,13 @@ pub struct ExportResult {
 }
 
 #[derive(Debug)]
+pub struct ExportJob {
+    pub source: PathBuf,
+    pub output: PathBuf,
+    pub name: String,
+}
+
+#[derive(Debug)]
 pub struct Model {
     pub clips: Vec<Clip>,
     pub selected: usize,
@@ -80,7 +87,8 @@ pub struct Model {
     pub editing: bool,
     pub field: EditField,
     pub status: String,
-    pub exporting: Option<PathBuf>,
+    pub jobs: Vec<ExportJob>,
+    pub removed: usize,
     pub pending_delete: Option<PathBuf>,
     export_tx: Sender<ExportResult>,
     export_rx: Receiver<ExportResult>,
@@ -138,7 +146,8 @@ impl Model {
             editing: false,
             field: EditField::Name,
             status,
-            exporting: None,
+            jobs: Vec::new(),
+            removed: 0,
             pending_delete: None,
             export_tx,
             export_rx,
@@ -157,17 +166,33 @@ impl Model {
         self.export_rx.try_recv().ok()
     }
 
+    pub fn is_exporting(&self, path: &Path) -> bool {
+        self.jobs.iter().any(|job| job.source == path)
+    }
+
+    pub fn output_in_use(&self, output: &Path) -> bool {
+        self.jobs.iter().any(|job| job.output == output)
+    }
+
     pub fn start_export(
         &mut self,
         source: PathBuf,
         output: PathBuf,
+        name: String,
         start: Option<String>,
         duration: Option<String>,
     ) {
         let sender = self.export_tx.clone();
-        self.exporting = Some(source.clone());
+        self.jobs.push(ExportJob {
+            source: source.clone(),
+            output: output.clone(),
+            name: name.clone(),
+        });
         self.editing = false;
-        self.status = format!("Exporting {}…", source.file_name().unwrap_or_default().to_string_lossy());
+        self.status = format!("Started exporting {name}");
+        if let Some(next) = self.next_pending() {
+            self.selected = next;
+        }
 
         std::thread::spawn(move || {
             let result = crate::ffmpeg::export(&source, &output, start.as_deref(), duration.as_deref())
@@ -177,40 +202,50 @@ impl Model {
         });
     }
 
+    fn next_pending(&self) -> Option<usize> {
+        let count = self.clips.len();
+        (1..=count)
+            .map(|offset| (self.selected + offset) % count)
+            .find(|&index| {
+                let clip = &self.clips[index];
+                !clip.exported && !self.is_exporting(&clip.path)
+            })
+    }
+
     pub fn finish_export(&mut self, result: ExportResult) {
-        self.exporting = None;
+        let name = self
+            .jobs
+            .iter()
+            .position(|job| job.source == result.source)
+            .map(|index| self.jobs.remove(index).name);
         match result.result {
             Ok(output) => {
                 let archived = archive_original(&result.source);
-                if let Some(clip) = self.clips.iter_mut().find(|clip| clip.path == result.source) {
-                    clip.exported = true;
-                    if let Ok(path) = &archived {
-                        clip.path = path.clone();
+                if let Some(index) = self.clips.iter().position(|clip| clip.path == result.source) {
+                    if archived.is_ok() {
+                        self.clips.remove(index);
+                        self.removed += 1;
+                        if index < self.selected {
+                            self.selected -= 1;
+                        }
+                        self.selected = self.selected.min(self.clips.len().saturating_sub(1));
+                    } else {
+                        self.clips[index].exported = true;
                     }
                 }
 
-                let was_on_exported_clip = self
-                    .current()
-                    .is_some_and(|clip| clip.path == result.source);
-                if was_on_exported_clip {
-                    if let Some(next) = next_unexported(&self.clips, self.selected) {
-                        self.selected = next;
-                        self.status = format!(
-                            "Saved {}; moved to the next unprocessed clip",
-                            output.file_name().unwrap_or_default().to_string_lossy()
-                        );
-                    } else {
-                        self.status = "All clips have been exported".to_owned();
-                    }
+                self.status = if self.jobs.is_empty() && self.clips.iter().all(|clip| clip.exported) {
+                    "All clips have been exported".to_owned()
                 } else {
-                    self.status = format!("Saved {}", output.display());
-                }
+                    format!("Saved {}", output.display())
+                };
                 if let Err(error) = archived {
                     self.status = format!("{}; could not move original: {error:#}", self.status);
                 }
             }
             Err(error) => {
-                self.status = format!("Export failed: {error}");
+                let name = name.unwrap_or_default();
+                self.status = format!("Export of {name} failed: {error}");
             }
         }
     }
@@ -222,7 +257,7 @@ impl Model {
         let path = clip.path.clone();
         let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
 
-        if self.exporting.as_ref() == Some(&path) {
+        if self.is_exporting(&path) {
             self.status = "Cannot delete a clip while it is being exported".to_owned();
             return;
         }
@@ -263,15 +298,6 @@ fn archive_original(source: &Path) -> Result<PathBuf> {
     fs::rename(source, &destination)
         .with_context(|| format!("could not move to {}", destination.display()))?;
     Ok(destination)
-}
-
-fn next_unexported(clips: &[Clip], selected: usize) -> Option<usize> {
-    if clips.is_empty() {
-        return None;
-    }
-    (1..=clips.len())
-        .map(|offset| (selected + offset) % clips.len())
-        .find(|&index| !clips[index].exported)
 }
 
 pub fn parse_timestamp(value: &str) -> Option<u64> {
