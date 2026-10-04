@@ -26,7 +26,7 @@ pub fn export(
     if let Some(start) = start {
         command.args(["-ss", start]);
     }
-    command.arg("-i").arg(input);
+    command.args(["-hwaccel", "auto"]).arg("-i").arg(input);
     if let Some(duration) = duration {
         command.args(["-t", duration]);
     }
