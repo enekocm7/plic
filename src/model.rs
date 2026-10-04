@@ -123,7 +123,7 @@ impl Model {
         let status = if clips.is_empty() {
             format!("No .mp4 files found in {}", directory.display())
         } else {
-            "←/→ browse clips · e edit · o open · q quit".to_owned()
+            format!("Found {} clips in {}", clips.len(), directory.display())
         };
 
         Ok(Self {
