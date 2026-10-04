@@ -81,6 +81,7 @@ pub struct Model {
     pub field: EditField,
     pub status: String,
     pub exporting: Option<PathBuf>,
+    pub pending_delete: Option<PathBuf>,
     export_tx: Sender<ExportResult>,
     export_rx: Receiver<ExportResult>,
 }
@@ -138,6 +139,7 @@ impl Model {
             field: EditField::Name,
             status,
             exporting: None,
+            pending_delete: None,
             export_tx,
             export_rx,
         })
@@ -210,6 +212,36 @@ impl Model {
             Err(error) => {
                 self.status = format!("Export failed: {error}");
             }
+        }
+    }
+
+    pub fn delete_current(&mut self) {
+        let Some(clip) = self.current() else {
+            return;
+        };
+        let path = clip.path.clone();
+        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+
+        if self.exporting.as_ref() == Some(&path) {
+            self.status = "Cannot delete a clip while it is being exported".to_owned();
+            return;
+        }
+        if self.pending_delete.as_ref() != Some(&path) {
+            self.status = format!("Press d again to permanently delete {name} (any other key cancels)");
+            self.pending_delete = Some(path);
+            return;
+        }
+
+        self.pending_delete = None;
+        match fs::remove_file(&path) {
+            Ok(()) => {
+                self.clips.remove(self.selected);
+                if self.selected >= self.clips.len() {
+                    self.selected = self.clips.len().saturating_sub(1);
+                }
+                self.status = format!("Deleted {name}");
+            }
+            Err(error) => self.status = format!("Could not delete {name}: {error}"),
         }
     }
 

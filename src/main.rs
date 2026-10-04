@@ -155,7 +155,7 @@ fn draw(model: &Model, f: &mut Frame) {
     let help = if model.editing {
         "Tab fields · ↑/↓ folders · Enter export · Ctrl+A clear · Esc browse · Ctrl+C quit"
     } else {
-        "←/→ clips · e edit · o open in default app · q quit"
+        "←/→ clips · e edit · o open in default app · d delete · q quit"
     };
     Line::from(model.status.as_str()).render(rows[8], buf);
     Line::from(help).render(rows[10], buf);
@@ -185,7 +185,11 @@ fn draw_input(
 }
 
 fn update(model: &mut Model, msg: Message) -> bool {
+    if !matches!(msg, Message::Delete | Message::ExportFinished(_)) {
+        model.pending_delete = None;
+    }
     match msg {
+        Message::Delete => model.delete_current(),
         Message::PreviousClip => {
             if !model.clips.is_empty() {
                 model.selected = if model.selected == 0 {

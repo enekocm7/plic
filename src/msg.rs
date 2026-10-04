@@ -11,6 +11,7 @@ pub enum Message {
     PreviousClip,
     NextClip,
     Open,
+    Delete,
     BeginEdit,
     CancelEdit,
     FocusNext,
@@ -77,6 +78,7 @@ fn key_to_message(key: KeyEvent, editing: bool, field: EditField) -> Option<Mess
         KeyCode::Left => Some(Message::PreviousClip),
         KeyCode::Right => Some(Message::NextClip),
         KeyCode::Char(character) if character.eq_ignore_ascii_case(&'o') => Some(Message::Open),
+        KeyCode::Char(character) if character.eq_ignore_ascii_case(&'d') => Some(Message::Delete),
         KeyCode::Char(character) if character.eq_ignore_ascii_case(&'e') => {
             Some(Message::BeginEdit)
         }
