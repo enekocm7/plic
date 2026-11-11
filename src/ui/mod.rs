@@ -3,6 +3,8 @@
 mod app;
 mod frame_image;
 mod library_panel;
+mod player;
+mod timeline;
 
 use std::path::PathBuf;
 
@@ -20,6 +22,13 @@ actions!(
     [
         SelectPreviousClip,
         SelectNextClip,
+        TogglePlay,
+        SeekBackward,
+        SeekForward,
+        StepBackward,
+        StepForward,
+        JumpToStart,
+        JumpToEnd,
         OpenFolder,
         Reload,
         ToggleTheme,
@@ -33,6 +42,16 @@ fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("up", SelectPreviousClip, shortcuts),
         KeyBinding::new("down", SelectNextClip, shortcuts),
+        KeyBinding::new("space", TogglePlay, shortcuts),
+        KeyBinding::new("k", TogglePlay, shortcuts),
+        KeyBinding::new("left", SeekBackward, shortcuts),
+        KeyBinding::new("right", SeekForward, shortcuts),
+        KeyBinding::new("j", SeekBackward, shortcuts),
+        KeyBinding::new("l", SeekForward, shortcuts),
+        KeyBinding::new(",", StepBackward, shortcuts),
+        KeyBinding::new(".", StepForward, shortcuts),
+        KeyBinding::new("home", JumpToStart, shortcuts),
+        KeyBinding::new("end", JumpToEnd, shortcuts),
         KeyBinding::new("ctrl-up", SelectPreviousClip, Some(CONTEXT)),
         KeyBinding::new("ctrl-down", SelectNextClip, Some(CONTEXT)),
         KeyBinding::new("ctrl-o", OpenFolder, Some(CONTEXT)),

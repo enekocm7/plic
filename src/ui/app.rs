@@ -15,13 +15,18 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use super::{
-    CONTEXT, OpenFolder, Reload, SelectNextClip, SelectPreviousClip, ToggleTheme, frame_image,
+    CONTEXT, JumpToEnd, JumpToStart, OpenFolder, Reload, SeekBackward, SeekForward, SelectNextClip,
+    SelectPreviousClip, StepBackward, StepForward, TogglePlay, ToggleTheme, frame_image,
+    player::Player,
 };
 use crate::{
     ffmpeg::{self, FrameSize, MediaInfo, RawFrame},
     library::{self, ClipFile, Library},
     worker::WorkerPool,
 };
+
+/// How far the arrow keys move the playhead, in milliseconds.
+const SEEK_STEP_MS: i64 = 5_000;
 
 /// Thumbnails are decoded at twice their on-screen size for HiDPI displays.
 const THUMBNAIL_SIZE: FrameSize = FrameSize::new(160, 90);
@@ -59,6 +64,7 @@ impl ClipEntry {
 
 pub struct PlicApp {
     focus: FocusHandle,
+    player: Entity<Player>,
     folder: Option<PathBuf>,
     pub(super) clips: Vec<ClipEntry>,
     folders: Vec<PathBuf>,
@@ -76,8 +82,10 @@ impl PlicApp {
     pub fn new(folder: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
+        let player = cx.new(|_| Player::new());
         let mut app = Self {
             focus,
+            player,
             folder: None,
             clips: Vec::new(),
             folders: Vec::new(),
@@ -136,11 +144,16 @@ impl PlicApp {
                 if this.generation != generation {
                     return;
                 }
-                if let Some(entry) = this.clips.iter_mut().find(|entry| entry.file.path == path) {
-                    entry.details = details;
-                    entry.thumbnail = thumbnail;
-                    cx.notify();
+                let Some(index) = this.index_of(&path) else {
+                    return;
+                };
+                let entry = &mut this.clips[index];
+                entry.details = details;
+                entry.thumbnail = thumbnail;
+                if this.selected == Some(index) {
+                    this.show_selected_in_player(cx);
                 }
+                cx.notify();
             })
             .ok();
         })
@@ -154,7 +167,68 @@ impl PlicApp {
         self.selected = Some(index);
         self.list_scroll
             .scroll_to_item(index, ScrollStrategy::Nearest);
+        self.show_selected_in_player(cx);
         cx.notify();
+    }
+
+    /// Loads the selected clip into the player once its details are known.
+    fn show_selected_in_player(&mut self, cx: &mut Context<Self>) {
+        let Some(entry) = self.current() else {
+            self.player.update(cx, |player, cx| player.clear(cx));
+            return;
+        };
+        let path = entry.file.path.clone();
+        match &entry.details {
+            Details::Ready(info) => {
+                let info = info.clone();
+                self.player
+                    .update(cx, |player, cx| player.load(path, info, cx));
+            }
+            Details::Loading => self.player.update(cx, |player, cx| player.clear(cx)),
+            Details::Failed(error) => {
+                let message = format!("Could not read this video: {error}").into();
+                self.player
+                    .update(cx, |player, cx| player.show_error(message, cx));
+            }
+        }
+    }
+
+    fn toggle_play(&mut self, _: &TogglePlay, window: &mut Window, cx: &mut Context<Self>) {
+        self.player
+            .update(cx, |player, cx| player.toggle_play(window, cx));
+    }
+
+    fn seek_backward(&mut self, _: &SeekBackward, window: &mut Window, cx: &mut Context<Self>) {
+        self.player
+            .update(cx, |player, cx| player.seek_by(-SEEK_STEP_MS, window, cx));
+    }
+
+    fn seek_forward(&mut self, _: &SeekForward, window: &mut Window, cx: &mut Context<Self>) {
+        self.player
+            .update(cx, |player, cx| player.seek_by(SEEK_STEP_MS, window, cx));
+    }
+
+    fn step_backward(&mut self, _: &StepBackward, window: &mut Window, cx: &mut Context<Self>) {
+        self.player
+            .update(cx, |player, cx| player.step(-1, window, cx));
+    }
+
+    fn step_forward(&mut self, _: &StepForward, window: &mut Window, cx: &mut Context<Self>) {
+        self.player
+            .update(cx, |player, cx| player.step(1, window, cx));
+    }
+
+    fn jump_to_start(&mut self, _: &JumpToStart, window: &mut Window, cx: &mut Context<Self>) {
+        self.player
+            .update(cx, |player, cx| player.seek(Duration::ZERO, window, cx));
+    }
+
+    fn jump_to_end(&mut self, _: &JumpToEnd, window: &mut Window, cx: &mut Context<Self>) {
+        self.player.update(cx, |player, cx| {
+            if let Some(duration) = player.duration() {
+                player.seek(duration, window, cx);
+            }
+        });
     }
 
     fn select_previous(&mut self, _: &SelectPreviousClip, _: &mut Window, cx: &mut Context<Self>) {
@@ -293,26 +367,6 @@ impl PlicApp {
                 ),
         )
     }
-
-    fn render_stage(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let message = match (&self.load_error, self.current()) {
-            (Some(error), _) => error.clone(),
-            (None, Some(entry)) => entry.file.file_name().into(),
-            (None, None) if self.folder.is_some() => "No videos in this folder".into(),
-            (None, None) => "Open a folder with clips to get started".into(),
-        };
-        v_flex()
-            .flex_1()
-            .min_w_0()
-            .items_center()
-            .justify_center()
-            .gap_2()
-            .bg(theme.background)
-            .text_color(theme.muted_foreground)
-            .child(Icon::new(IconName::Film).large())
-            .child(div().text_sm().child(message))
-    }
 }
 
 impl Render for PlicApp {
@@ -333,13 +387,20 @@ impl Render for PlicApp {
             .on_action(cx.listener(Self::open_folder))
             .on_action(cx.listener(Self::reload))
             .on_action(cx.listener(Self::toggle_theme))
+            .on_action(cx.listener(Self::toggle_play))
+            .on_action(cx.listener(Self::seek_backward))
+            .on_action(cx.listener(Self::seek_forward))
+            .on_action(cx.listener(Self::step_backward))
+            .on_action(cx.listener(Self::step_forward))
+            .on_action(cx.listener(Self::jump_to_start))
+            .on_action(cx.listener(Self::jump_to_end))
             .child(self.render_title_bar(cx))
             .child(
                 h_flex()
                     .flex_1()
                     .min_h_0()
                     .child(self.render_library(cx))
-                    .child(self.render_stage(cx)),
+                    .child(div().flex_1().min_w_0().h_full().child(self.player.clone())),
             )
     }
 }

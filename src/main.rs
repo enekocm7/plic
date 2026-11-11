@@ -4,6 +4,7 @@
 
 mod ffmpeg;
 mod library;
+mod playback;
 mod timestamp;
 mod trim;
 mod ui;
