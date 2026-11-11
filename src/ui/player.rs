@@ -10,18 +10,25 @@ use std::{
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 
-use super::{frame_image, timeline};
+use super::{
+    frame_image,
+    timeline::{self, Drag, TimelineState},
+};
 use crate::{
     audio::AudioOutput,
     ffmpeg::{self, FrameSize, MediaInfo},
     playback::{MAX_FRAME_RATE, Playback},
     timestamp,
+    trim::{self, TrimRange},
+    worker::WorkerPool,
 };
 
 /// Decode size used before the viewer has been laid out.
@@ -30,6 +37,17 @@ const DEFAULT_VIEWPORT: FrameSize = FrameSize::new(1280, 720);
 /// How long the viewport must stay the same size before playback restarts
 /// at the new resolution; avoids restarting on every step of a resize drag.
 const RESIZE_SETTLE: Duration = Duration::from_millis(250);
+
+/// Thumbnails along the timeline.
+const FILMSTRIP_TILES: usize = 12;
+const FILMSTRIP_TILE_SIZE: FrameSize = FrameSize::new(192, 108);
+
+/// Emitted when the user changes the trim range from the viewer.
+pub enum PlayerEvent {
+    TrimChanged(TrimRange),
+}
+
+impl EventEmitter<PlayerEvent> for Player {}
 
 /// The clip loaded into the player.
 struct Source {
@@ -90,10 +108,14 @@ pub struct Player {
     viewport: Rc<Cell<Option<FrameSize>>>,
     viewport_changed_at: Option<Instant>,
     tick_scheduled: bool,
-    /// Playback was running when a scrub started and resumes when it ends.
-    resume_after_scrub: bool,
-    pub(super) scrubbing: bool,
+    /// Playback was running when a drag started and resumes when it ends.
+    resume_after_drag: bool,
+    drag: Option<Drag>,
     error: Option<SharedString>,
+    trim: TrimRange,
+    looping: bool,
+    filmstrip: Vec<Option<Arc<RenderImage>>>,
+    filmstrip_workers: WorkerPool,
     audio: AudioDevice,
     volume: f32,
     muted: bool,
@@ -130,9 +152,13 @@ impl Player {
             viewport: Rc::new(Cell::new(None)),
             viewport_changed_at: None,
             tick_scheduled: false,
-            resume_after_scrub: false,
-            scrubbing: false,
+            resume_after_drag: false,
+            drag: None,
             error: None,
+            trim: TrimRange::default(),
+            looping: false,
+            filmstrip: Vec::new(),
+            filmstrip_workers: WorkerPool::new("filmstrip", 2),
             audio: AudioDevice::Unopened,
             volume,
             muted: false,
@@ -140,8 +166,14 @@ impl Player {
         }
     }
 
-    /// Loads a clip and shows its first frame.
-    pub fn load(&mut self, path: PathBuf, info: MediaInfo, cx: &mut Context<Self>) {
+    /// Loads a clip and shows the first frame of its trim range.
+    pub fn load(
+        &mut self,
+        path: PathBuf,
+        info: MediaInfo,
+        trim: TrimRange,
+        cx: &mut Context<Self>,
+    ) {
         if self
             .source
             .as_ref()
@@ -151,7 +183,10 @@ impl Player {
         }
         self.unload();
         self.source = Some(Source { path, info });
-        self.request_still(Duration::ZERO, cx);
+        self.trim = trim;
+        self.position = trim.start;
+        self.request_still(trim.start, cx);
+        self.request_filmstrip(cx);
         cx.notify();
     }
 
@@ -175,15 +210,11 @@ impl Player {
         self.stills = StillRequests::default();
         self.frame_size = None;
         self.error = None;
-        self.scrubbing = false;
-        self.resume_after_scrub = false;
-        if let Some(frame) = self.frame.take() {
-            self.stale_frames.push(frame);
-        }
-    }
-
-    pub fn has_source(&self) -> bool {
-        self.source.is_some()
+        self.drag = None;
+        self.resume_after_drag = false;
+        self.trim = TrimRange::default();
+        self.stale_frames.extend(self.frame.take());
+        self.stale_frames.extend(self.filmstrip.drain(..).flatten());
     }
 
     pub fn duration(&self) -> Option<Duration> {
@@ -224,10 +255,15 @@ impl Player {
             playback.resume();
         } else {
             let mut from = self.position;
-            // Pressing play at the end starts over.
-            if let Some(duration) = source.info.duration
-                && from + source.info.frame_interval() >= duration
-            {
+            let near_end = |end: Duration| from + source.info.frame_interval() >= end;
+            if self.looping {
+                // Looping plays the selection, so start inside it.
+                let end = self.trim.resolved_end(source.info.duration);
+                if from < self.trim.start || end.is_some_and(near_end) {
+                    from = self.trim.start;
+                }
+            } else if source.info.duration.is_some_and(near_end) {
+                // Pressing play at the end starts over.
                 from = Duration::ZERO;
             }
             self.start_playback(from, cx);
@@ -284,7 +320,7 @@ impl Player {
         let was_playing = self.is_playing();
         self.playback = None;
         self.position = to;
-        if was_playing && !self.scrubbing {
+        if was_playing && self.drag.is_none() {
             self.start_playback(to, cx);
             self.schedule_tick(window, cx);
         } else {
@@ -330,21 +366,176 @@ impl Player {
         }
     }
 
-    pub fn begin_scrub(&mut self, cx: &mut Context<Self>) {
-        self.resume_after_scrub = self.is_playing();
-        if let Some(playback) = self.playback.take() {
-            self.position = playback.position();
+    pub fn trim(&self) -> TrimRange {
+        self.trim
+    }
+
+    pub fn is_looping(&self) -> bool {
+        self.looping
+    }
+
+    /// Replaces the trim range, e.g. after it was typed into the editor.
+    pub fn set_trim(&mut self, trim: TrimRange, cx: &mut Context<Self>) {
+        if self.trim != trim {
+            self.trim = trim;
+            cx.notify();
         }
-        self.scrubbing = true;
+    }
+
+    fn change_trim(&mut self, trim: TrimRange, cx: &mut Context<Self>) {
+        if self.trim != trim {
+            self.trim = trim;
+            cx.emit(PlayerEvent::TrimChanged(trim));
+            cx.notify();
+        }
+    }
+
+    /// Starts the exported range at the playhead.
+    pub fn mark_in(&mut self, cx: &mut Context<Self>) {
+        if self.source.is_none() {
+            return;
+        }
+        let start = self.position();
+        // An in point past the out point keeps the start and drops the end.
+        let end = self.trim.end.filter(|end| *end >= start + trim::MIN_LENGTH);
+        self.change_trim(TrimRange::new(start, end), cx);
+    }
+
+    /// Ends the exported range at the playhead.
+    pub fn mark_out(&mut self, cx: &mut Context<Self>) {
+        if self.source.is_none() {
+            return;
+        }
+        let end = self.position();
+        // An out point before the in point keeps the end and drops the start.
+        let start = if end >= self.trim.start + trim::MIN_LENGTH {
+            self.trim.start
+        } else {
+            Duration::ZERO
+        };
+        self.change_trim(TrimRange::new(start, Some(end)), cx);
+    }
+
+    pub fn reset_trim(&mut self, cx: &mut Context<Self>) {
+        self.change_trim(TrimRange::default(), cx);
+    }
+
+    pub fn toggle_loop(&mut self, cx: &mut Context<Self>) {
+        self.looping = !self.looping;
         cx.notify();
     }
 
-    pub fn end_scrub(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.scrubbing = false;
-        if std::mem::take(&mut self.resume_after_scrub) {
+    pub fn jump_to_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.seek(self.trim.start, window, cx);
+    }
+
+    pub fn jump_to_out(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(end) = self.trim.resolved_end(self.duration()) {
+            self.seek(end, window, cx);
+        }
+    }
+
+    pub(super) fn begin_drag(&mut self, drag: Drag, cx: &mut Context<Self>) {
+        self.resume_after_drag = self.is_playing();
+        if let Some(playback) = self.playback.take() {
+            self.position = playback.position();
+        }
+        self.drag = Some(drag);
+        cx.notify();
+    }
+
+    /// Moves whatever is being dragged to `time`, previewing that frame.
+    pub(super) fn drag_to(&mut self, time: Duration, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(drag) = self.drag else {
+            return;
+        };
+        let duration = self.duration().unwrap_or(time);
+        let time = time.min(duration);
+        match drag {
+            Drag::Playhead => {}
+            Drag::TrimStart => {
+                let limit = self
+                    .trim
+                    .resolved_end(Some(duration))
+                    .unwrap_or(duration)
+                    .saturating_sub(trim::MIN_LENGTH);
+                self.change_trim(TrimRange::new(time.min(limit), self.trim.end), cx);
+            }
+            Drag::TrimEnd => {
+                let end = time.max(self.trim.start + trim::MIN_LENGTH).min(duration);
+                // Dragging to the very end means "until the end of the video".
+                let end = (end + self.frame_interval() < duration).then_some(end);
+                self.change_trim(TrimRange::new(self.trim.start, end), cx);
+            }
+        }
+        let preview = match drag {
+            Drag::Playhead => time,
+            Drag::TrimStart => self.trim.start,
+            Drag::TrimEnd => self.trim.resolved_end(Some(duration)).unwrap_or(time),
+        };
+        self.seek(preview, window, cx);
+    }
+
+    pub(super) fn end_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.drag.take().is_none() {
+            return;
+        }
+        if std::mem::take(&mut self.resume_after_drag) {
             self.play(window, cx);
         }
         cx.notify();
+    }
+
+    pub(super) fn timeline_state(&self) -> TimelineState {
+        TimelineState {
+            duration: self.duration(),
+            position: self.position(),
+            trim: self.trim,
+            filmstrip: self.filmstrip.clone(),
+            drag: self.drag,
+            aspect_ratio: self
+                .source
+                .as_ref()
+                .and_then(|source| source.info.video_size)
+                .map_or(16. / 9., FrameSize::aspect_ratio),
+        }
+    }
+
+    /// Decodes evenly spaced keyframes to draw along the timeline.
+    fn request_filmstrip(&mut self, cx: &mut Context<Self>) {
+        let Some(source) = &self.source else {
+            return;
+        };
+        let (Some(duration), Some(video_size)) = (source.info.duration, source.info.video_size)
+        else {
+            return;
+        };
+        let size = video_size.fit_within(FILMSTRIP_TILE_SIZE);
+        self.filmstrip = vec![None; FILMSTRIP_TILES];
+        let generation = self.generation;
+        for index in 0..FILMSTRIP_TILES {
+            let at = duration.mul_f64((index as f64 + 0.5) / FILMSTRIP_TILES as f64);
+            let path = source.path.clone();
+            let job = self
+                .filmstrip_workers
+                .run(move || ffmpeg::extract_keyframe(&path, at, size));
+            cx.spawn(async move |this, cx| {
+                let Ok(Ok(frame)) = job.await else {
+                    return;
+                };
+                let image = frame_image::render_image(frame);
+                this.update(cx, |this, cx| {
+                    if this.generation == generation
+                        && let Some(slot) = this.filmstrip.get_mut(index)
+                    {
+                        *slot = image;
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
     }
 
     fn decode_size(&self, source: &Source) -> FrameSize {
@@ -439,6 +630,13 @@ impl Player {
         }
 
         let finished = self.playback.as_ref().is_some_and(Playback::is_finished);
+        if self.looping {
+            let end = self.trim.resolved_end(self.duration());
+            if finished || end.is_some_and(|end| self.position() >= end) {
+                self.seek(self.trim.start, window, cx);
+                return;
+            }
+        }
         if finished {
             self.position = self.duration().unwrap_or(self.position());
             self.playback = None;
@@ -614,6 +812,20 @@ impl Player {
                     ),
             )
             .child(div().flex_1())
+            .child(
+                Button::new("loop")
+                    .ghost()
+                    .small()
+                    .icon(IconName::Repeat)
+                    .selected(self.looping)
+                    .tooltip(if self.looping {
+                        "Stop looping the selection (R)"
+                    } else {
+                        "Loop the selection (R)"
+                    })
+                    .disabled(!enabled)
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_loop(cx))),
+            )
             .child(self.render_volume(cx))
     }
 
@@ -661,7 +873,7 @@ impl Render for Player {
                     .flex_none()
                     .border_t_1()
                     .border_color(border)
-                    .child(timeline::render(self, cx))
+                    .child(timeline::render(self.timeline_state(), cx))
                     .child(self.render_transport(cx)),
             )
     }

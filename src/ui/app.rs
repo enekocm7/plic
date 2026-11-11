@@ -15,13 +15,15 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use super::{
-    CONTEXT, JumpToEnd, JumpToStart, OpenFolder, Reload, SeekBackward, SeekForward, SelectNextClip,
-    SelectPreviousClip, StepBackward, StepForward, ToggleMute, TogglePlay, ToggleTheme,
-    frame_image, player::Player,
+    CONTEXT, JumpToEnd, JumpToIn, JumpToOut, JumpToStart, MarkIn, MarkOut, OpenFolder, Reload,
+    ResetTrim, SeekBackward, SeekForward, SelectNextClip, SelectPreviousClip, StepBackward,
+    StepForward, ToggleLoop, ToggleMute, TogglePlay, ToggleTheme, frame_image,
+    player::{Player, PlayerEvent},
 };
 use crate::{
     ffmpeg::{self, FrameSize, MediaInfo, RawFrame},
     library::{self, ClipFile, Library},
+    trim::TrimRange,
     worker::WorkerPool,
 };
 
@@ -43,6 +45,8 @@ pub struct ClipEntry {
     pub file: ClipFile,
     pub details: Details,
     pub thumbnail: Option<Arc<RenderImage>>,
+    /// The part of the clip to export, kept while browsing other clips.
+    pub trim: TrimRange,
 }
 
 impl ClipEntry {
@@ -51,6 +55,7 @@ impl ClipEntry {
             file,
             details: Details::Loading,
             thumbnail: None,
+            trim: TrimRange::default(),
         }
     }
 
@@ -83,6 +88,7 @@ impl PlicApp {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         let player = cx.new(Player::new);
+        cx.subscribe(&player, Self::on_player_event).detach();
         let mut app = Self {
             focus,
             player,
@@ -180,9 +186,9 @@ impl PlicApp {
         let path = entry.file.path.clone();
         match &entry.details {
             Details::Ready(info) => {
-                let info = info.clone();
+                let (info, trim) = (info.clone(), entry.trim);
                 self.player
-                    .update(cx, |player, cx| player.load(path, info, cx));
+                    .update(cx, |player, cx| player.load(path, info, trim, cx));
             }
             Details::Loading => self.player.update(cx, |player, cx| player.clear(cx)),
             Details::Failed(error) => {
@@ -191,6 +197,43 @@ impl PlicApp {
                     .update(cx, |player, cx| player.show_error(message, cx));
             }
         }
+    }
+
+    fn on_player_event(&mut self, _: Entity<Player>, event: &PlayerEvent, cx: &mut Context<Self>) {
+        match event {
+            PlayerEvent::TrimChanged(trim) => {
+                if let Some(entry) = self.current_mut() {
+                    entry.trim = *trim;
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    fn mark_in(&mut self, _: &MarkIn, _: &mut Window, cx: &mut Context<Self>) {
+        self.player.update(cx, |player, cx| player.mark_in(cx));
+    }
+
+    fn mark_out(&mut self, _: &MarkOut, _: &mut Window, cx: &mut Context<Self>) {
+        self.player.update(cx, |player, cx| player.mark_out(cx));
+    }
+
+    fn reset_trim(&mut self, _: &ResetTrim, _: &mut Window, cx: &mut Context<Self>) {
+        self.player.update(cx, |player, cx| player.reset_trim(cx));
+    }
+
+    fn toggle_loop(&mut self, _: &ToggleLoop, _: &mut Window, cx: &mut Context<Self>) {
+        self.player.update(cx, |player, cx| player.toggle_loop(cx));
+    }
+
+    fn jump_to_in(&mut self, _: &JumpToIn, window: &mut Window, cx: &mut Context<Self>) {
+        self.player
+            .update(cx, |player, cx| player.jump_to_in(window, cx));
+    }
+
+    fn jump_to_out(&mut self, _: &JumpToOut, window: &mut Window, cx: &mut Context<Self>) {
+        self.player
+            .update(cx, |player, cx| player.jump_to_out(window, cx));
     }
 
     fn toggle_play(&mut self, _: &TogglePlay, window: &mut Window, cx: &mut Context<Self>) {
@@ -287,6 +330,10 @@ impl PlicApp {
 
     pub(super) fn current(&self) -> Option<&ClipEntry> {
         self.clips.get(self.selected?)
+    }
+
+    pub(super) fn current_mut(&mut self) -> Option<&mut ClipEntry> {
+        self.clips.get_mut(self.selected?)
     }
 
     fn index_of(&self, path: &Path) -> Option<usize> {
@@ -399,6 +446,12 @@ impl Render for PlicApp {
             .on_action(cx.listener(Self::jump_to_start))
             .on_action(cx.listener(Self::jump_to_end))
             .on_action(cx.listener(Self::toggle_mute))
+            .on_action(cx.listener(Self::mark_in))
+            .on_action(cx.listener(Self::mark_out))
+            .on_action(cx.listener(Self::reset_trim))
+            .on_action(cx.listener(Self::toggle_loop))
+            .on_action(cx.listener(Self::jump_to_in))
+            .on_action(cx.listener(Self::jump_to_out))
             .child(self.render_title_bar(cx))
             .child(
                 h_flex()
