@@ -12,8 +12,11 @@ use gpui_kit::*;
 use super::player::Player;
 use crate::trim::TrimRange;
 
-const HEIGHT: f32 = 64.;
 const STRIP_HEIGHT: f32 = 44.;
+/// Room above the strip for the playhead knob.
+const STRIP_TOP: f32 = 18.;
+const HEIGHT: f32 = STRIP_TOP + STRIP_HEIGHT + 10.;
+const KNOB_SIZE: f32 = 12.;
 const INSET: f32 = 16.;
 const RADIUS: f32 = 6.;
 const HANDLE_WIDTH: f32 = 10.;
@@ -111,6 +114,7 @@ pub fn render(state: TimelineState, cx: &mut Context<Player>) -> impl IntoElemen
         selection: theme.yellow,
         handle_grip: black().opacity(0.55),
         playhead: white(),
+        knob_border: black().opacity(0.35),
     };
     let this = cx.entity().downgrade();
 
@@ -122,7 +126,7 @@ pub fn render(state: TimelineState, cx: &mut Context<Player>) -> impl IntoElemen
             };
             let scale = Scale::new(bounds, duration);
             let strip = Bounds {
-                origin: point(scale.left, bounds.center().y - px(STRIP_HEIGHT / 2.)),
+                origin: point(scale.left, bounds.origin.y + px(STRIP_TOP)),
                 size: size(scale.width, px(STRIP_HEIGHT)),
             };
             let handles = Handles::new(&scale, state.trim);
@@ -153,6 +157,7 @@ struct Colors {
     selection: Hsla,
     handle_grip: Hsla,
     playhead: Hsla,
+    knob_border: Hsla,
 }
 
 fn paint_filmstrip(
@@ -252,15 +257,20 @@ fn paint_selection(window: &mut Window, strip: Bounds<Pixels>, handles: Handles,
 
 fn paint_playhead(window: &mut Window, strip: Bounds<Pixels>, x: Pixels, colors: &Colors) {
     let line = Bounds {
-        origin: point(x - px(1.), strip.origin.y - px(8.)),
-        size: size(px(2.), strip.size.height + px(16.)),
+        origin: point(x - px(1.), strip.origin.y - px(6.)),
+        size: size(px(2.), strip.size.height + px(12.)),
     };
     window.paint_quad(fill(line, colors.playhead).corner_radii(px(1.)));
     let knob = Bounds {
-        origin: point(x - px(5.), strip.origin.y - px(12.)),
-        size: size(px(10.), px(10.)),
+        origin: point(x - px(KNOB_SIZE / 2.), strip.origin.y - px(KNOB_SIZE + 3.)),
+        size: size(px(KNOB_SIZE), px(KNOB_SIZE)),
     };
-    window.paint_quad(fill(knob, colors.playhead).corner_radii(px(5.)));
+    window.paint_quad(
+        fill(knob, colors.playhead)
+            .corner_radii(px(KNOB_SIZE / 2.))
+            .border_widths(px(2.))
+            .border_color(colors.knob_border),
+    );
 }
 
 /// Listening at window level keeps a drag alive when the pointer leaves the
