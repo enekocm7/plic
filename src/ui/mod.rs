@@ -1,6 +1,7 @@
 //! The GPUI front end.
 
 mod app;
+mod clip_actions;
 mod editor;
 mod frame_image;
 mod jobs;
@@ -39,6 +40,7 @@ actions!(
         JumpToIn,
         JumpToOut,
         ExportClip,
+        DeleteClip,
         OpenFolder,
         Reload,
         ToggleTheme,
@@ -69,6 +71,7 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-o", JumpToOut, shortcuts),
         KeyBinding::new("x", ResetTrim, shortcuts),
         KeyBinding::new("r", ToggleLoop, shortcuts),
+        KeyBinding::new("delete", DeleteClip, shortcuts),
         // Works from inside the editor's text fields too.
         KeyBinding::new("ctrl-enter", ExportClip, Some(CONTEXT)),
         KeyBinding::new("ctrl-up", SelectPreviousClip, Some(CONTEXT)),

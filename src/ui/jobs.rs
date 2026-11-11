@@ -2,11 +2,7 @@
 //! hardware encoder is never asked for more sessions than it has; the user
 //! moves on to the next clip as soon as one is queued.
 
-use std::{
-    path::{Path, PathBuf},
-    thread,
-    time::Duration,
-};
+use std::path::{Path, PathBuf};
 
 use futures::StreamExt as _;
 use gpui_kit::assets::IconName;
@@ -22,11 +18,6 @@ use crate::{
     ffmpeg::{self, CancelToken, ExportError, ExportRequest},
     library,
 };
-
-/// The archive move is retried for a moment, because Windows refuses to move
-/// a file that a just-stopped decoder still has open.
-const ARCHIVE_ATTEMPTS: u32 = 10;
-const ARCHIVE_RETRY_DELAY: Duration = Duration::from_millis(200);
 
 pub struct ExportJob {
     id: u64,
@@ -221,7 +212,7 @@ impl PlicApp {
         }
         let archive = cx.background_spawn({
             let source = source.clone();
-            async move { archive_with_retries(&source) }
+            async move { library::retry_while_busy(|| library::archive_original(&source)) }
         });
         cx.spawn_in(window, async move |this, cx| {
             let archived = archive.await;
@@ -363,19 +354,5 @@ impl PlicApp {
                     ),
             )
             .child(Progress::new(("job-progress", id)).value(job.progress.unwrap_or(0.0) * 100.0))
-    }
-}
-
-fn archive_with_retries(source: &Path) -> anyhow::Result<PathBuf> {
-    let mut attempt = 1;
-    loop {
-        match library::archive_original(source) {
-            Ok(archived) => return Ok(archived),
-            Err(_) if attempt < ARCHIVE_ATTEMPTS && source.exists() => {
-                attempt += 1;
-                thread::sleep(ARCHIVE_RETRY_DELAY);
-            }
-            Err(error) => return Err(error),
-        }
     }
 }

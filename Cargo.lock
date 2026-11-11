@@ -5180,6 +5180,7 @@ dependencies = [
  "futures",
  "gpui-kit",
  "image",
+ "open",
  "rtrb",
  "serde",
  "serde_json",

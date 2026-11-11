@@ -15,9 +15,9 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use super::{
-    CONTEXT, ExportClip, JumpToEnd, JumpToIn, JumpToOut, JumpToStart, MarkIn, MarkOut, OpenFolder,
-    Reload, ResetTrim, SeekBackward, SeekForward, SelectNextClip, SelectPreviousClip, StepBackward,
-    StepForward, ToggleLoop, ToggleMute, TogglePlay, ToggleTheme,
+    CONTEXT, DeleteClip, ExportClip, JumpToEnd, JumpToIn, JumpToOut, JumpToStart, MarkIn, MarkOut,
+    OpenFolder, Reload, ResetTrim, SeekBackward, SeekForward, SelectNextClip, SelectPreviousClip,
+    StepBackward, StepForward, ToggleLoop, ToggleMute, TogglePlay, ToggleTheme,
     editor::Editor,
     frame_image,
     jobs::ExportJob,
@@ -297,6 +297,10 @@ impl PlicApp {
         self.export_current(window, cx);
     }
 
+    fn delete_clip(&mut self, _: &DeleteClip, window: &mut Window, cx: &mut Context<Self>) {
+        self.confirm_delete(window, cx);
+    }
+
     fn mark_in(&mut self, _: &MarkIn, _: &mut Window, cx: &mut Context<Self>) {
         self.player.update(cx, |player, cx| player.mark_in(cx));
     }
@@ -544,6 +548,7 @@ impl Render for PlicApp {
             .on_action(cx.listener(Self::jump_to_in))
             .on_action(cx.listener(Self::jump_to_out))
             .on_action(cx.listener(Self::export_clip))
+            .on_action(cx.listener(Self::delete_clip))
             .child(self.render_title_bar(cx))
             .child(
                 h_flex()
@@ -551,7 +556,7 @@ impl Render for PlicApp {
                     .min_h_0()
                     .child(self.render_library(cx))
                     .child(
-                        div()
+                        v_flex()
                             .flex_1()
                             .min_w_0()
                             .h_full()
@@ -561,7 +566,8 @@ impl Render for PlicApp {
                                 MouseButton::Left,
                                 cx.listener(|this, _, window, cx| this.focus.focus(window, cx)),
                             )
-                            .child(self.player.clone()),
+                            .child(self.render_clip_header(cx))
+                            .child(div().flex_1().min_h_0().child(self.player.clone())),
                     )
                     .child(self.render_export_panel(cx)),
             )

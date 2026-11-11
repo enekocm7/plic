@@ -4,7 +4,9 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    time::SystemTime,
+    process::Command,
+    thread,
+    time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
@@ -19,7 +21,6 @@ const VIDEO_EXTENSIONS: [&str; 5] = ["mp4", "mov", "mkv", "webm", "m4v"];
 pub struct ClipFile {
     pub path: PathBuf,
     pub size: u64,
-    pub modified: Option<SystemTime>,
 }
 
 impl ClipFile {
@@ -38,7 +39,6 @@ impl ClipFile {
 /// The contents of a clips folder.
 #[derive(Debug, Clone)]
 pub struct Library {
-    pub root: PathBuf,
     pub clips: Vec<ClipFile>,
     /// Subfolders that exports can be saved into, sorted by name.
     pub folders: Vec<PathBuf>,
@@ -67,7 +67,6 @@ impl Library {
                 clips.push(ClipFile {
                     path,
                     size: metadata.len(),
-                    modified: metadata.modified().ok(),
                 });
             }
         }
@@ -75,11 +74,7 @@ impl Library {
         clips.sort_by_cached_key(|clip| sort_key(&clip.path));
         folders.sort_by_cached_key(|path| sort_key(path));
 
-        Ok(Self {
-            root: root.to_path_buf(),
-            clips,
-            folders,
-        })
+        Ok(Self { clips, folders })
     }
 }
 
@@ -126,6 +121,50 @@ pub fn archive_original(source: &Path) -> Result<PathBuf> {
 pub fn trash_clip(path: &Path) -> Result<()> {
     trash::delete(path)
         .with_context(|| format!("could not move {} to the trash", display_name(path)))
+}
+
+/// Runs a file operation, retrying for a moment while it fails. On Windows a
+/// file cannot be moved or deleted while a just-stopped decoder still has it
+/// open.
+pub fn retry_while_busy<T>(mut operation: impl FnMut() -> Result<T>) -> Result<T> {
+    const ATTEMPTS: u32 = 10;
+    const DELAY: Duration = Duration::from_millis(200);
+    let mut attempt = 1;
+    loop {
+        match operation() {
+            Err(_) if attempt < ATTEMPTS => {
+                attempt += 1;
+                thread::sleep(DELAY);
+            }
+            result => return result,
+        }
+    }
+}
+
+/// Opens the system file manager with `path` selected where supported.
+pub fn show_in_file_manager(path: &Path) -> Result<()> {
+    let mut command = if cfg!(windows) {
+        // Explorer wants `/select,` and the path as one argument.
+        let mut select = std::ffi::OsString::from("/select,");
+        select.push(path);
+        let mut command = Command::new("explorer");
+        command.arg(select);
+        command
+    } else if cfg!(target_os = "macos") {
+        let mut command = Command::new("open");
+        command.arg("-R").arg(path);
+        command
+    } else {
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        return open::that_detached(parent)
+            .with_context(|| format!("could not open {}", parent.display()));
+    };
+    // Explorer reports a failure exit code even when it works, so only a
+    // failure to start counts.
+    command
+        .spawn()
+        .map(drop)
+        .context("could not start the file manager")
 }
 
 /// Why a name cannot be used for an exported file.
