@@ -1,0 +1,378 @@
+//! Re-encoding a trimmed range of a clip with ffmpeg.
+//!
+//! Output is written to a hidden temporary file next to the destination and
+//! only published once ffmpeg succeeds, so a crash or cancellation never
+//! leaves a truncated video behind under the requested name.
+
+use std::{
+    fs::{self, OpenOptions},
+    io::{self, BufRead, BufReader, Read},
+    path::{Path, PathBuf},
+    process::{Child, Command, Stdio},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    thread,
+    time::Duration,
+};
+
+use anyhow::{Context, Result, bail};
+
+use super::{CommandExt as _, seconds_arg};
+use crate::trim::TrimRange;
+
+static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+static ENCODER: OnceLock<&'static Encoder> = OnceLock::new();
+
+struct Encoder {
+    args: &'static [&'static str],
+}
+
+// Hardware encoders first; software x264 is the fallback and always works.
+const ENCODERS: [Encoder; 4] = [
+    Encoder {
+        args: &[
+            "-c:v", "h264_amf", "-quality", "balanced", "-rc", "cqp", "-qp_i", "20", "-qp_p", "20",
+        ],
+    },
+    Encoder {
+        args: &[
+            "-c:v",
+            "h264_nvenc",
+            "-preset",
+            "p4",
+            "-rc",
+            "vbr",
+            "-cq",
+            "20",
+            "-b:v",
+            "0",
+        ],
+    },
+    Encoder {
+        args: &[
+            "-c:v",
+            "h264_qsv",
+            "-preset",
+            "fast",
+            "-global_quality",
+            "20",
+        ],
+    },
+    Encoder {
+        args: &["-c:v", "libx264", "-preset", "fast", "-crf", "20"],
+    },
+];
+
+/// Picks the first encoder that can actually encode a test clip on this machine.
+fn encoder() -> &'static Encoder {
+    ENCODER.get_or_init(|| {
+        ENCODERS
+            .iter()
+            .find(|candidate| works(candidate))
+            .unwrap_or(&ENCODERS[ENCODERS.len() - 1])
+    })
+}
+
+fn works(encoder: &Encoder) -> bool {
+    Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i"])
+        .arg("color=c=black:s=640x360:r=30:d=0.5,format=yuv420p")
+        .args(encoder.args)
+        .args(["-f", "null", "-"])
+        .no_window()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Probes the encoders on a background thread so the first export does not
+/// pay for it.
+pub fn warm_up_encoder() {
+    thread::spawn(encoder);
+}
+
+/// Everything needed to produce one trimmed output file.
+#[derive(Debug, Clone)]
+pub struct ExportRequest {
+    pub source: PathBuf,
+    pub output: PathBuf,
+    pub range: TrimRange,
+    /// Length of the source, used to report progress for open-ended ranges.
+    pub source_duration: Option<Duration>,
+}
+
+impl ExportRequest {
+    /// Length of the produced video, when it can be known up front.
+    fn expected_length(&self) -> Option<Duration> {
+        self.range.length(self.source_duration)
+    }
+}
+
+/// Lets the UI cancel a running export.
+#[derive(Debug, Clone, Default)]
+pub struct CancelToken(Arc<AtomicBool>);
+
+impl CancelToken {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+/// Why an export did not produce a file.
+#[derive(Debug)]
+pub enum ExportError {
+    Cancelled,
+    Failed(anyhow::Error),
+}
+
+impl std::fmt::Display for ExportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cancelled => f.write_str("export was cancelled"),
+            Self::Failed(error) => write!(f, "{error:#}"),
+        }
+    }
+}
+
+impl From<anyhow::Error> for ExportError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Failed(error)
+    }
+}
+
+/// Roughly how large an export of `length` from a source of `source_bytes`
+/// and `source_duration` will be. Exports are encoded at constant quality,
+/// so the source's average bitrate is the best cheap guess.
+pub fn estimated_size(source_bytes: u64, source_duration: Duration, length: Duration) -> u64 {
+    if source_duration.is_zero() {
+        return 0;
+    }
+    let fraction = (length.as_secs_f64() / source_duration.as_secs_f64()).clamp(0.0, 1.0);
+    (source_bytes as f64 * fraction).round() as u64
+}
+
+/// Runs ffmpeg for `request`, calling `on_progress` with a fraction in
+/// `0.0..=1.0` as encoding advances. Blocks until the export finishes.
+pub fn export(
+    request: &ExportRequest,
+    cancel: &CancelToken,
+    mut on_progress: impl FnMut(f32),
+) -> Result<PathBuf, ExportError> {
+    let output = &request.output;
+    if output.exists() {
+        return Err(anyhow::anyhow!("{} already exists", output.display()).into());
+    }
+    let temporary = create_temp_path(output)?;
+    // Removes the temporary file on every early return below.
+    let guard = TempFile(&temporary);
+
+    let mut command = Command::new("ffmpeg");
+    command.args(["-hide_banner", "-loglevel", "error", "-nostats", "-y"]);
+    if !request.range.start.is_zero() {
+        command.arg("-ss").arg(seconds_arg(request.range.start));
+    }
+    command
+        .args(["-hwaccel", "auto"])
+        .arg("-i")
+        .arg(&request.source);
+    if let Some(length) = request
+        .range
+        .end
+        .map(|end| end.saturating_sub(request.range.start))
+    {
+        command.arg("-t").arg(seconds_arg(length));
+    }
+    command
+        .args(encoder().args)
+        .args(["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"])
+        .args(["-progress", "pipe:1"])
+        .arg(&temporary)
+        .no_window()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = command
+        .spawn()
+        .context("could not start ffmpeg; check that it is installed and on PATH")?;
+    let stderr = drain_in_background(child.stderr.take());
+
+    let expected = request.expected_length();
+    if let Some(stdout) = child.stdout.take() {
+        for line in BufReader::new(stdout).lines() {
+            if cancel.is_cancelled() {
+                kill(&mut child);
+                return Err(ExportError::Cancelled);
+            }
+            let Ok(line) = line else { break };
+            if let (Some(expected), Some(done)) = (expected, parse_progress_line(&line)) {
+                let fraction = done.as_secs_f64() / expected.as_secs_f64().max(f64::EPSILON);
+                on_progress(fraction.clamp(0.0, 1.0) as f32);
+            }
+        }
+    }
+
+    let status = child.wait().context("ffmpeg did not finish")?;
+    if cancel.is_cancelled() {
+        return Err(ExportError::Cancelled);
+    }
+    if !status.success() {
+        let stderr = stderr.join().unwrap_or_default();
+        let stderr = stderr.trim();
+        if stderr.is_empty() {
+            return Err(anyhow::anyhow!("ffmpeg exited with status {status}").into());
+        }
+        return Err(anyhow::anyhow!("ffmpeg exited with status {status}: {stderr}").into());
+    }
+
+    on_progress(1.0);
+    publish(&temporary, output)?;
+    // The published file is a hard link or a copy; the temporary goes either way.
+    drop(guard);
+    Ok(output.clone())
+}
+
+/// Reads `out_time_us=…` lines from ffmpeg's `-progress` output.
+fn parse_progress_line(line: &str) -> Option<Duration> {
+    let micros = line
+        .strip_prefix("out_time_us=")?
+        .trim()
+        .parse::<u64>()
+        .ok()?;
+    Some(Duration::from_micros(micros))
+}
+
+fn kill(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn drain_in_background(pipe: Option<impl Read + Send + 'static>) -> thread::JoinHandle<String> {
+    thread::spawn(move || {
+        let mut text = String::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_string(&mut text);
+        }
+        text
+    })
+}
+
+struct TempFile<'a>(&'a Path);
+
+impl Drop for TempFile<'_> {
+    fn drop(&mut self) {
+        // A killed ffmpeg can hold the file for a moment longer, especially
+        // behind a launcher shim, and Windows will not delete an open file.
+        for _ in 0..20 {
+            match fs::remove_file(self.0) {
+                Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                    thread::sleep(Duration::from_millis(100));
+                }
+                _ => return,
+            }
+        }
+    }
+}
+
+fn create_temp_path(output: &Path) -> Result<PathBuf> {
+    let parent = output.parent().unwrap_or_else(|| Path::new("."));
+    let stem = output
+        .file_stem()
+        .map(|stem| stem.to_string_lossy())
+        .unwrap_or_default();
+    for _ in 0..100 {
+        let id = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+        let candidate = parent.join(format!(".{stem}.plic-{}-{id}.mp4", std::process::id()));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(_) => return Ok(candidate),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("could not create temporary output in {}", parent.display())
+                });
+            }
+        }
+    }
+    bail!(
+        "could not reserve a temporary output name in {}",
+        parent.display()
+    );
+}
+
+/// Moves the finished temporary file to `output` without ever overwriting an
+/// existing file.
+fn publish(temporary: &Path, output: &Path) -> Result<()> {
+    match fs::hard_link(temporary, output) {
+        Ok(()) => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            bail!("{} already exists; choose another name", output.display());
+        }
+        // Hard links are unsupported on some file systems; fall back to a copy.
+        Err(_) => {}
+    }
+
+    let mut destination = match OpenOptions::new().write(true).create_new(true).open(output) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            bail!("{} already exists; choose another name", output.display());
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("could not create {}", output.display()));
+        }
+    };
+
+    let copied = (|| -> Result<()> {
+        let mut source = fs::File::open(temporary)
+            .with_context(|| format!("could not open {}", temporary.display()))?;
+        io::copy(&mut source, &mut destination)
+            .with_context(|| format!("could not copy video to {}", output.display()))?;
+        destination
+            .sync_all()
+            .with_context(|| format!("could not finish writing {}", output.display()))
+    })();
+    drop(destination);
+
+    if copied.is_err() {
+        let _ = fs::remove_file(output);
+    }
+    copied
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn estimates_size_from_the_source_bitrate() {
+        let mb = 1024 * 1024;
+        let minute = Duration::from_secs(60);
+        assert_eq!(
+            estimated_size(60 * mb, minute, Duration::from_secs(15)),
+            15 * mb
+        );
+        assert_eq!(estimated_size(60 * mb, minute, minute * 2), 60 * mb);
+        assert_eq!(estimated_size(60 * mb, Duration::ZERO, minute), 0);
+    }
+
+    #[test]
+    fn reads_progress_lines() {
+        assert_eq!(
+            parse_progress_line("out_time_us=1500000"),
+            Some(Duration::from_millis(1500))
+        );
+        assert_eq!(parse_progress_line("out_time_us=N/A"), None);
+        assert_eq!(parse_progress_line("frame=12"), None);
+    }
+}

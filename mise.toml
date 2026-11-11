@@ -11,3 +11,8 @@ run_windows = [
     "move .\\target\\release\\plic.exe .\\clips\\plic.exe",
     "cd clips && .\\plic.exe"
 ]
+
+[tasks.dev]
+alias = "d"
+description = "Runs a debug build on the clips directory"
+run = "cargo run -- clips"
