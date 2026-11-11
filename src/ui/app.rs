@@ -17,11 +17,12 @@ use gpui_kit::*;
 use super::{
     CONTEXT, DeleteClip, ExportClip, JumpToEnd, JumpToIn, JumpToOut, JumpToStart, MarkIn, MarkOut,
     OpenFolder, Reload, ResetTrim, SeekBackward, SeekForward, SelectNextClip, SelectPreviousClip,
-    StepBackward, StepForward, ToggleLoop, ToggleMute, TogglePlay, ToggleTheme,
+    ShowShortcuts, StepBackward, StepForward, ToggleLoop, ToggleMute, TogglePlay, ToggleTheme,
     editor::Editor,
     frame_image,
     jobs::ExportJob,
     player::{Player, PlayerEvent},
+    shortcuts,
 };
 use crate::{
     ffmpeg::{self, FrameSize, MediaInfo, RawFrame},
@@ -414,6 +415,10 @@ impl PlicApp {
         }
     }
 
+    fn show_shortcuts(&mut self, _: &ShowShortcuts, window: &mut Window, cx: &mut Context<Self>) {
+        shortcuts::open(window, cx);
+    }
+
     fn toggle_theme(&mut self, _: &ToggleTheme, window: &mut Window, cx: &mut Context<Self>) {
         let mode = if cx.theme().mode.is_dark() {
             ThemeMode::Light
@@ -497,6 +502,16 @@ impl PlicApp {
                                 })),
                         )
                         .child(
+                            Button::new("shortcuts")
+                                .ghost()
+                                .small()
+                                .icon(IconName::Keyboard)
+                                .tooltip("Keyboard shortcuts (?)")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.show_shortcuts(&ShowShortcuts, window, cx)
+                                })),
+                        )
+                        .child(
                             Button::new("theme")
                                 .ghost()
                                 .small()
@@ -549,6 +564,7 @@ impl Render for PlicApp {
             .on_action(cx.listener(Self::jump_to_out))
             .on_action(cx.listener(Self::export_clip))
             .on_action(cx.listener(Self::delete_clip))
+            .on_action(cx.listener(Self::show_shortcuts))
             .child(self.render_title_bar(cx))
             .child(
                 h_flex()
