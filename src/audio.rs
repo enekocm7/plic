@@ -341,11 +341,8 @@ fn feed(mut stdout: impl Read, mut producer: Producer<f32>, channels: u16, state
         let filled = carry + read;
         let whole = filled - filled % 4;
         samples.clear();
-        samples.extend(
-            bytes[..whole]
-                .chunks_exact(4)
-                .map(|sample| f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]])),
-        );
+        let (frames, _) = bytes[..whole].as_chunks::<4>();
+        samples.extend(frames.iter().map(|sample| f32::from_le_bytes(*sample)));
         bytes.copy_within(whole..filled, 0);
         carry = filled - whole;
 
