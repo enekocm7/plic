@@ -62,17 +62,26 @@ pub fn extract_frame(path: &Path, at: Duration, size: FrameSize) -> Result<RawFr
     run_single_frame(command, size, at, "bicubic")
 }
 
-/// Decodes the keyframe at or before `at`. Much faster than [`extract_frame`]
-/// because nothing between keyframes is decoded; good enough for thumbnails.
+/// Decodes a frame near `at`, normally the keyframe before it. Much faster
+/// than [`extract_frame`] because frames between keyframes are skipped; good
+/// enough for thumbnails.
 pub fn extract_keyframe(path: &Path, at: Duration, size: FrameSize) -> Result<RawFrame> {
-    let mut command = base_command();
-    command
-        .args(["-skip_frame", "nokey", "-noaccurate_seek"])
-        .arg("-ss")
-        .arg(seconds_arg(at))
-        .arg("-i")
-        .arg(path);
-    run_single_frame(command, size, at, "bilinear")
+    let fast_seek = |skip_to_keyframes: bool| {
+        let mut command = base_command();
+        if skip_to_keyframes {
+            command.args(["-skip_frame", "nokey"]);
+        }
+        command
+            .arg("-noaccurate_seek")
+            .arg("-ss")
+            .arg(seconds_arg(at))
+            .arg("-i")
+            .arg(path);
+        run_single_frame(command, size, at, "bilinear")
+    };
+    // Past the last keyframe, skipping non-key frames leaves nothing to
+    // output; decoding normally from that keyframe still works.
+    fast_seek(true).or_else(|_| fast_seek(false))
 }
 
 fn base_command() -> Command {
