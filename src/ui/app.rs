@@ -65,6 +65,8 @@ pub struct ClipEntry {
     pub segments: Segments,
     /// Crop, rotation and flips applied to the export.
     pub transform: Transform,
+    /// Audio tracks to export, by `0:a:N` index; `None` keeps them all.
+    pub audio_tracks: Option<Vec<usize>>,
     /// Destination chosen for this clip, if it differs from the default.
     pub folder: Option<PathBuf>,
     pub status: ClipStatus,
@@ -84,8 +86,22 @@ impl ClipEntry {
             thumbnail: None,
             segments: Segments::default(),
             transform: Transform::identity(),
+            audio_tracks: None,
             folder: None,
             status: ClipStatus::Pending,
+        }
+    }
+
+    /// The audio tracks to export, in stream order.
+    pub fn export_tracks(&self) -> Vec<usize> {
+        let count = self.info().map_or(0, |info| info.audio_tracks.len());
+        match &self.audio_tracks {
+            Some(tracks) => tracks
+                .iter()
+                .copied()
+                .filter(|&track| track < count)
+                .collect(),
+            None => (0..count).collect(),
         }
     }
 
@@ -381,6 +397,7 @@ impl PlicApp {
         entry.status = ClipStatus::Pending;
         entry.segments = Segments::default();
         entry.transform = Transform::identity();
+        entry.audio_tracks = None;
         self.settled.insert(0, entry);
         if let Some(selected) = &mut self.settled_selected {
             *selected += 1;

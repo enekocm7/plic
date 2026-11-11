@@ -19,7 +19,45 @@ pub struct MediaInfo {
     pub video_size: Option<FrameSize>,
     pub frame_rate: Option<f64>,
     pub has_audio: bool,
+    /// Every audio stream, in `0:a:N` order.
+    pub audio_tracks: Vec<AudioTrack>,
     pub video_codec: Option<String>,
+}
+
+/// One audio stream of a clip, as recorders such as OBS label them.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AudioTrack {
+    pub title: Option<String>,
+    pub language: Option<String>,
+    pub channels: Option<u32>,
+}
+
+impl AudioTrack {
+    /// `Track 2 · Mic · mono`
+    pub fn describe(&self, index: usize) -> String {
+        let mut parts = vec![format!("Track {}", index + 1)];
+        if let Some(title) = self
+            .title
+            .as_deref()
+            .filter(|title| !title.trim().is_empty())
+        {
+            parts.push(title.trim().to_owned());
+        }
+        if let Some(language) = self
+            .language
+            .as_deref()
+            .filter(|language| *language != "und")
+        {
+            parts.push(language.to_owned());
+        }
+        match self.channels {
+            Some(1) => parts.push("mono".into()),
+            Some(2) => parts.push("stereo".into()),
+            Some(channels) => parts.push(format!("{channels} ch")),
+            None => {}
+        }
+        parts.join(" · ")
+    }
 }
 
 impl MediaInfo {
@@ -147,6 +185,7 @@ struct Format {
 #[derive(Deserialize)]
 struct Stream {
     codec_type: Option<String>,
+    channels: Option<u32>,
     codec_name: Option<String>,
     width: Option<u32>,
     height: Option<u32>,
@@ -169,6 +208,8 @@ struct SideData {
 #[derive(Deserialize, Default)]
 struct Tags {
     rotate: Option<String>,
+    title: Option<String>,
+    language: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -184,10 +225,17 @@ fn parse(json: &[u8]) -> Result<MediaInfo> {
     let video = probe.streams.iter().find(|stream| {
         stream.codec_type.as_deref() == Some("video") && stream.disposition.attached_pic == 0
     });
-    let has_audio = probe
+    let audio_tracks: Vec<AudioTrack> = probe
         .streams
         .iter()
-        .any(|stream| stream.codec_type.as_deref() == Some("audio"));
+        .filter(|stream| stream.codec_type.as_deref() == Some("audio"))
+        .map(|stream| AudioTrack {
+            title: stream.tags.title.clone(),
+            language: stream.tags.language.clone(),
+            channels: stream.channels,
+        })
+        .collect();
+    let has_audio = !audio_tracks.is_empty();
 
     let duration = probe
         .format
@@ -219,6 +267,7 @@ fn parse(json: &[u8]) -> Result<MediaInfo> {
         video_size,
         frame_rate,
         has_audio,
+        audio_tracks,
         video_codec: video.and_then(|stream| stream.codec_name.clone()),
     })
 }
@@ -255,7 +304,10 @@ mod tests {
             "streams": [
                 {"codec_type": "video", "codec_name": "h264", "width": 1920, "height": 1080,
                  "avg_frame_rate": "60/1", "r_frame_rate": "60/1"},
-                {"codec_type": "audio", "codec_name": "aac"}
+                {"codec_type": "audio", "codec_name": "aac", "channels": 2,
+                 "tags": {"title": "Game", "language": "und"}},
+                {"codec_type": "audio", "codec_name": "aac", "channels": 1,
+                 "tags": {"title": "Mic", "language": "eng"}}
             ],
             "format": {"duration": "61.250000"}
         }"#;
@@ -264,6 +316,12 @@ mod tests {
         assert_eq!(info.video_size, Some(FrameSize::new(1920, 1080)));
         assert_eq!(info.frame_rate, Some(60.0));
         assert!(info.has_audio);
+        assert_eq!(info.audio_tracks.len(), 2);
+        assert_eq!(info.audio_tracks[0].describe(0), "Track 1 · Game · stereo");
+        assert_eq!(
+            info.audio_tracks[1].describe(1),
+            "Track 2 · Mic · eng · mono"
+        );
         assert_eq!(info.video_codec.as_deref(), Some("h264"));
         Ok(())
     }
