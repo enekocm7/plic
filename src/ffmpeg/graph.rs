@@ -6,6 +6,37 @@
 //! and audio chains applied. A stream copy keeps the video as it is and only
 //! needs a graph when the audio has to be mixed or filtered.
 
+/// The loudness `loudnorm` aims for, in LUFS: what most video sites
+/// normalize to.
+pub const TARGET_LOUDNESS: f32 = -14.0;
+
+/// Volume changes applied to the exported sound, independent of the
+/// viewer's playback volume.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct AudioAdjust {
+    /// Gain in decibels; 0 leaves the level alone.
+    pub gain_db: f32,
+    /// Normalizes the loudness to [`TARGET_LOUDNESS`], after the gain.
+    pub normalize: bool,
+}
+
+impl AudioAdjust {
+    /// The audio filter chain, or `None` when the sound is left alone.
+    pub fn filter(&self) -> Option<String> {
+        let mut filters = Vec::new();
+        if self.gain_db.abs() >= 0.05 {
+            filters.push(format!("volume={:.1}dB", self.gain_db));
+        }
+        if self.normalize {
+            // loudnorm works at 192 kHz internally; bring it back down.
+            filters.push(format!(
+                "loudnorm=I={TARGET_LOUDNESS}:TP=-1.5:LRA=11,aresample=48000"
+            ));
+        }
+        (!filters.is_empty()).then(|| filters.join(","))
+    }
+}
+
 /// Which audio tracks go into the export and what happens to them.
 #[derive(Debug, Clone, Copy)]
 pub struct AudioPlan<'a> {
@@ -136,6 +167,24 @@ mod tests {
             reencode(2, None, plan(&[])),
             "[0:v:0][1:v:0]concat=n=2:v=1:a=0[joined];[joined]null[v]"
         );
+    }
+
+    #[test]
+    fn adjustments_become_an_audio_chain() {
+        assert_eq!(AudioAdjust::default().filter(), None);
+        let louder = AudioAdjust {
+            gain_db: 3.0,
+            normalize: true,
+        };
+        assert_eq!(
+            louder.filter().as_deref(),
+            Some("volume=3.0dB,loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000")
+        );
+        let quieter = AudioAdjust {
+            gain_db: -6.5,
+            normalize: false,
+        };
+        assert_eq!(quieter.filter().as_deref(), Some("volume=-6.5dB"));
     }
 
     #[test]

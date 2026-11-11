@@ -23,7 +23,7 @@ use anyhow::{Context, Result, bail};
 
 use super::{
     CommandExt as _, FrameSize, Transform,
-    graph::{self, AudioPlan},
+    graph::{self, AudioAdjust, AudioPlan},
     seconds_arg,
 };
 use crate::trim::TrimRange;
@@ -125,6 +125,8 @@ pub struct ExportRequest {
     /// Audio streams (`0:a:N`) to keep, mixed into one when there are
     /// several. Empty drops the sound.
     pub audio_tracks: Vec<usize>,
+    /// Gain and loudness normalization for the exported sound.
+    pub audio_adjust: AudioAdjust,
     /// Display size of the source, needed to crop it.
     pub video_size: Option<FrameSize>,
     pub transform: Transform,
@@ -205,9 +207,10 @@ pub fn export(
 
     let mut command = Command::new("ffmpeg");
     command.args(["-hide_banner", "-loglevel", "error", "-nostats", "-y"]);
+    let audio_filter = request.audio_adjust.filter();
     let audio = AudioPlan {
         tracks: &request.audio_tracks,
-        chain: None,
+        chain: audio_filter.as_deref(),
     };
     // Kept alive until ffmpeg is done with it.
     let mut _concat_list = None;
@@ -245,7 +248,7 @@ pub fn export(
             }
             command.args(["-map", "0:v:0", "-c:v", "copy"]);
             if let Some(audio_graph) = graph::copy_audio(audio) {
-                // Mixed or filtered sound has to be encoded again.
+                // Mixed or adjusted sound has to be encoded again.
                 command
                     .arg("-filter_complex")
                     .arg(audio_graph)

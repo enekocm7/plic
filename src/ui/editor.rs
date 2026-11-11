@@ -44,6 +44,9 @@ pub const PANEL_WIDTH: f32 = 320.;
 /// Destination folder names, filtered as the user types.
 type FolderList = SearchableVec<SharedString>;
 
+/// The gain slider's range, in decibels either way.
+const MAX_GAIN_DB: f32 = 20.0;
+
 /// Keyframe lookups kept before the cache is cleared; dragging a handle
 /// asks for a new one every few frames.
 const KEYFRAME_CACHE_LIMIT: usize = 256;
@@ -77,6 +80,8 @@ pub struct Editor {
     folder: Entity<SelectState<FolderList>>,
     /// Where the crop sits, from the left or top edge (0) to the other (1).
     crop_position: Entity<SliderState>,
+    /// Gain applied to the exported sound, in decibels.
+    gain: Entity<SliderState>,
     /// Why the typed times cannot be used, shown under the fields.
     time_error: Option<SharedString>,
     /// Why the last export attempt was refused, shown under the button.
@@ -118,8 +123,17 @@ impl Editor {
                 .default_value(0.5)
         });
 
+        let gain = cx.new(|_| {
+            SliderState::new()
+                .min(-MAX_GAIN_DB)
+                .max(MAX_GAIN_DB)
+                .step(0.5)
+                .default_value(0.0)
+        });
+
         let subscriptions = vec![
             cx.subscribe_in(&crop_position, window, PlicApp::on_crop_position_event),
+            cx.subscribe_in(&gain, window, PlicApp::on_gain_event),
             cx.subscribe_in(&name, window, PlicApp::on_name_event),
             cx.subscribe_in(&part_name, window, PlicApp::on_part_name_event),
             cx.subscribe_in(&start, window, |this, _, event, window, cx| {
@@ -138,6 +152,7 @@ impl Editor {
             end,
             folder,
             crop_position,
+            gain,
             time_error: None,
             export_error: None,
             mode: ExportMode::default(),
@@ -176,6 +191,12 @@ impl PlicApp {
         self.editor
             .crop_position
             .update(cx, |slider, cx| slider.set_value(position, window, cx));
+        let gain = self
+            .current()
+            .map_or(0.0, |entry| entry.audio_adjust.gain_db);
+        self.editor
+            .gain
+            .update(cx, |slider, cx| slider.set_value(gain, window, cx));
         self.editor.folder.update(cx, |select, cx| match &folder {
             Some(folder) => select.set_selected_value(folder, window, cx),
             None => select.set_selected_index(None, window, cx),
@@ -950,6 +971,38 @@ impl PlicApp {
             )
     }
 
+    fn on_gain_event(
+        &mut self,
+        _: &Entity<SliderState>,
+        event: &SliderEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (SliderEvent::Change(value) | SliderEvent::Release(value)) = event;
+        let gain = value.start();
+        if let Some(entry) = self.current_mut() {
+            entry.audio_adjust.gain_db = gain;
+            cx.notify();
+        }
+    }
+
+    fn reset_gain(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(entry) = self.current_mut() {
+            entry.audio_adjust.gain_db = 0.0;
+        }
+        self.editor
+            .gain
+            .update(cx, |slider, cx| slider.set_value(0.0, window, cx));
+        cx.notify();
+    }
+
+    fn set_normalize(&mut self, normalize: bool, cx: &mut Context<Self>) {
+        if let Some(entry) = self.current_mut() {
+            entry.audio_adjust.normalize = normalize;
+            cx.notify();
+        }
+    }
+
     /// Adds or removes one audio track of the selected clip.
     fn toggle_audio_track(&mut self, track: usize, keep: bool, cx: &mut Context<Self>) {
         let Some(entry) = self.current_mut() else {
@@ -1014,6 +1067,44 @@ impl PlicApp {
                     ),
             )
             .children(rows)
+            .when(!kept.is_empty(), |column| {
+                let adjust = entry.audio_adjust;
+                column
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child("Gain"),
+                            )
+                            .child(div().flex_1().child(Slider::new(&self.editor.gain)))
+                            .child(
+                                Button::new("reset-gain")
+                                    .ghost()
+                                    .xsmall()
+                                    .w(px(60.))
+                                    .label(format!("{:+.1} dB", adjust.gain_db))
+                                    .tooltip("Reset to 0 dB")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.reset_gain(window, cx)
+                                    })),
+                            ),
+                    )
+                    .child(
+                        Checkbox::new("normalize-loudness")
+                            .small()
+                            .label(format!(
+                                "Normalize loudness to {} LUFS",
+                                ffmpeg::TARGET_LOUDNESS
+                            ))
+                            .checked(adjust.normalize)
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.set_normalize(*checked, cx)
+                            })),
+                    )
+            })
     }
 
     fn set_mode(&mut self, lossless: bool, cx: &mut Context<Self>) {

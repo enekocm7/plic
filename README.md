@@ -44,7 +44,8 @@ turns, or flip it. These always re-encode.
 
 Under **Audio**, pick which audio tracks to keep. Recordings with separate
 game and microphone tracks are mixed into one; untick everything to drop
-the sound.
+the sound. A gain slider and **Normalize loudness** (to -14 LUFS) change the
+exported level without touching the viewer's volume.
 
 Turn on **Lossless** in the export panel to copy the video instead of
 re-encoding it: the export is near-instant and keeps the original quality,
