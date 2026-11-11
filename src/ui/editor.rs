@@ -34,7 +34,7 @@ use super::app::{ClipEntry, ClipStatus, PlicApp, display_name};
 use super::library_panel::format_size;
 use super::{AddSegment, SplitAtPlayhead};
 use crate::{
-    ffmpeg::{self, CropAspect, ExportMode, Transform},
+    ffmpeg::{self, Codec, CropAspect, ExportMode, Quality, Transform},
     library, timestamp,
     trim::{self, TrimRange},
 };
@@ -88,6 +88,8 @@ pub struct Editor {
     pub(super) export_error: Option<SharedString>,
     /// How exports are written. Kept while moving between clips.
     pub(super) mode: ExportMode,
+    /// Codec and quality of re-encoded exports.
+    pub(super) video: ffmpeg::VideoEncoding,
     /// Whether several segments become one file or one file each.
     pub(super) join: bool,
     /// Keyframe at or before a clip's start, by clip and requested start.
@@ -156,6 +158,7 @@ impl Editor {
             time_error: None,
             export_error: None,
             mode: ExportMode::default(),
+            video: ffmpeg::VideoEncoding::default(),
             join: true,
             keyframes: HashMap::new(),
             keyframe_pending: false,
@@ -1107,6 +1110,60 @@ impl PlicApp {
             })
     }
 
+    fn set_codec(&mut self, codec: Codec, cx: &mut Context<Self>) {
+        if self.editor.video.codec != codec {
+            self.editor.video.codec = codec;
+            // Find a working encoder before the export needs one.
+            ffmpeg::warm_up_encoder(codec);
+            cx.notify();
+        }
+    }
+
+    fn set_quality(&mut self, quality: Quality, cx: &mut Context<Self>) {
+        self.editor.video.quality = quality;
+        cx.notify();
+    }
+
+    /// Codec and quality buttons for re-encoded exports.
+    fn render_encoding(&self, enabled: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let video = self.editor.video;
+        let row = |label: &'static str| {
+            h_flex().gap_2().child(
+                div()
+                    .w(px(48.))
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(label),
+            )
+        };
+        let codecs = Codec::ALL.map(|codec| {
+            Button::new(SharedString::from(format!("codec-{}", codec.label())))
+                .ghost()
+                .xsmall()
+                .flex_1()
+                .label(codec.label())
+                .tooltip(codec.description())
+                .selected(video.codec == codec)
+                .disabled(!enabled)
+                .on_click(cx.listener(move |this, _, _, cx| this.set_codec(codec, cx)))
+        });
+        let qualities = Quality::ALL.map(|quality| {
+            Button::new(SharedString::from(format!("quality-{}", quality.label())))
+                .ghost()
+                .xsmall()
+                .flex_1()
+                .label(quality.label())
+                .selected(video.quality == quality)
+                .disabled(!enabled)
+                .on_click(cx.listener(move |this, _, _, cx| this.set_quality(quality, cx)))
+        });
+        v_flex()
+            .gap_1()
+            .child(row("Codec").child(h_flex().flex_1().gap_0p5().children(codecs)))
+            .child(row("Quality").child(h_flex().flex_1().gap_0p5().children(qualities)))
+    }
+
     fn set_mode(&mut self, lossless: bool, cx: &mut Context<Self>) {
         self.editor.mode = if lossless {
             ExportMode::StreamCopy
@@ -1388,7 +1445,15 @@ impl PlicApp {
                             |panel, entry| panel.child(self.render_audio_controls(entry, cx)),
                         )
                         .child(summary)
-                        .child(v_flex().gap_1p5().child(mode_row).children(snapped))
+                        .child(
+                            v_flex()
+                                .gap_1p5()
+                                .child(mode_row)
+                                .children(snapped)
+                                .when(!lossless, |column| {
+                                    column.child(self.render_encoding(enabled, cx))
+                                }),
+                        )
                         .child(
                             v_flex()
                                 .gap_1p5()

@@ -101,7 +101,7 @@ pub fn run(folder: Option<PathBuf>) {
             gpui_kit::init(cx);
             // Probing the hardware encoders takes a moment; do it before the
             // first export needs it.
-            crate::ffmpeg::warm_up_encoder();
+            crate::ffmpeg::warm_up_encoder(crate::ffmpeg::Codec::default());
             // Video reads best on a dark surround, whatever the OS theme.
             Theme::change(ThemeMode::Dark, None, cx);
             bind_keys(cx);

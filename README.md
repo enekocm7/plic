@@ -13,8 +13,10 @@ Built with [GPUI](https://www.gpui.rs) through gpui-kit and its
 ## Requirements
 
 `ffmpeg` and `ffprobe` must be on `PATH`. They decode the preview and
-encode the exports. Exports use the first hardware H.264 encoder that
-works (AMF, NVENC or Quick Sync) and fall back to `libx264`.
+encode the exports. Exports are H.264, HEVC or AV1 at a Small, Balanced
+or High quality preset. Each codec uses the first hardware encoder that
+works (AMF, NVENC or Quick Sync) and falls back to `libx264`, `libx265`
+or `libsvtav1`/`libaom-av1`.
 
 ## Usage
 
