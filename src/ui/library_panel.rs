@@ -4,11 +4,12 @@ use std::ops::Range;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::scroll::Scrollbar;
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, Theme, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use super::app::PlicApp;
+use super::app::{ClipEntry, Details, PlicApp};
+use crate::timestamp;
 
 const PANEL_WIDTH: f32 = 280.;
 const ROW_HEIGHT: f32 = 64.;
@@ -79,22 +80,7 @@ impl PlicApp {
                     .when(selected, |row| row.bg(theme.sidebar_accent))
                     .when(!selected, |row| row.hover(|row| row.bg(theme.list_hover)))
                     .on_click(cx.listener(move |this, _, _, cx| this.select(index, cx)))
-                    .child(
-                        div()
-                            .w(px(80.))
-                            .h(px(45.))
-                            .flex_none()
-                            .rounded(theme.radius)
-                            .bg(theme.muted)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                Icon::new(IconName::Film)
-                                    .small()
-                                    .text_color(theme.muted_foreground),
-                            ),
-                    )
+                    .child(render_thumbnail(entry, &theme))
                     .child(
                         v_flex()
                             .flex_1()
@@ -113,7 +99,8 @@ impl PlicApp {
                                 div()
                                     .text_xs()
                                     .text_color(theme.muted_foreground)
-                                    .child(format_size(entry.file.size)),
+                                    .truncate()
+                                    .child(subtitle(entry)),
                             ),
                     );
                 // Padding outside the row keeps the highlight off the panel edges.
@@ -127,6 +114,75 @@ impl PlicApp {
                 )
             })
             .collect()
+    }
+}
+
+fn render_thumbnail(entry: &ClipEntry, theme: &Theme) -> impl IntoElement {
+    let duration = entry
+        .info()
+        .and_then(|info| info.duration)
+        .map(timestamp::format_coarse);
+    div()
+        .relative()
+        .w(px(80.))
+        .h(px(45.))
+        .flex_none()
+        .rounded(theme.radius)
+        .overflow_hidden()
+        .bg(theme.muted)
+        .flex()
+        .items_center()
+        .justify_center()
+        .map(|frame| match (&entry.thumbnail, &entry.details) {
+            (Some(thumbnail), _) => frame.child(
+                img(thumbnail.clone())
+                    .size_full()
+                    .object_fit(ObjectFit::Cover),
+            ),
+            (None, Details::Failed(_)) => frame.child(
+                Icon::new(IconName::CircleAlert)
+                    .small()
+                    .text_color(theme.danger),
+            ),
+            (None, _) => frame.child(
+                Icon::new(IconName::Film)
+                    .small()
+                    .text_color(theme.muted_foreground),
+            ),
+        })
+        .when_some(duration, |frame, duration| {
+            frame.child(
+                div()
+                    .absolute()
+                    .right(px(3.))
+                    .bottom(px(3.))
+                    .px_1()
+                    .rounded_sm()
+                    .bg(black().opacity(0.75))
+                    .text_color(white())
+                    .text_size(px(10.))
+                    .line_height(px(14.))
+                    .child(duration),
+            )
+        })
+}
+
+/// `1080p60 · 22 MB`, or why the clip could not be read.
+fn subtitle(entry: &ClipEntry) -> SharedString {
+    let size = format_size(entry.file.size);
+    match &entry.details {
+        Details::Ready(info) => match info.video_size {
+            Some(video) => {
+                let rate = info
+                    .frame_rate
+                    .map(|rate| format!("{}", rate.round() as u32))
+                    .unwrap_or_default();
+                format!("{}p{rate} · {size}", video.width.min(video.height)).into()
+            }
+            None => format!("Audio only · {size}").into(),
+        },
+        Details::Loading => size.into(),
+        Details::Failed(_) => "Unreadable video".into(),
     }
 }
 

@@ -1,6 +1,7 @@
 //! The GPUI front end.
 
 mod app;
+mod frame_image;
 mod library_panel;
 
 use std::path::PathBuf;

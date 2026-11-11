@@ -1,6 +1,10 @@
 //! The main window: clip library, viewer and export panel.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -10,12 +14,47 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use super::{CONTEXT, OpenFolder, Reload, SelectNextClip, SelectPreviousClip, ToggleTheme};
-use crate::library::{self, ClipFile, Library};
+use super::{
+    CONTEXT, OpenFolder, Reload, SelectNextClip, SelectPreviousClip, ToggleTheme, frame_image,
+};
+use crate::{
+    ffmpeg::{self, FrameSize, MediaInfo, RawFrame},
+    library::{self, ClipFile, Library},
+    worker::WorkerPool,
+};
+
+/// Thumbnails are decoded at twice their on-screen size for HiDPI displays.
+const THUMBNAIL_SIZE: FrameSize = FrameSize::new(160, 90);
+
+/// Metadata that is loaded in the background after the folder is listed.
+pub enum Details {
+    Loading,
+    Ready(MediaInfo),
+    Failed(SharedString),
+}
 
 /// A clip in the library together with everything the UI tracks about it.
 pub struct ClipEntry {
     pub file: ClipFile,
+    pub details: Details,
+    pub thumbnail: Option<Arc<RenderImage>>,
+}
+
+impl ClipEntry {
+    fn new(file: ClipFile) -> Self {
+        Self {
+            file,
+            details: Details::Loading,
+            thumbnail: None,
+        }
+    }
+
+    pub fn info(&self) -> Option<&MediaInfo> {
+        match &self.details {
+            Details::Ready(info) => Some(info),
+            _ => None,
+        }
+    }
 }
 
 pub struct PlicApp {
@@ -26,6 +65,11 @@ pub struct PlicApp {
     pub(super) selected: Option<usize>,
     pub(super) list_scroll: UniformListScrollHandle,
     load_error: Option<SharedString>,
+    workers: WorkerPool,
+    /// Bumped on every folder load so results for an old folder are ignored.
+    generation: u64,
+    /// Images to evict from the GPU atlas on the next frame.
+    stale_images: Vec<Arc<RenderImage>>,
 }
 
 impl PlicApp {
@@ -40,6 +84,9 @@ impl PlicApp {
             selected: None,
             list_scroll: UniformListScrollHandle::new(),
             load_error: None,
+            workers: WorkerPool::new("inspect", 3),
+            generation: 0,
+            stale_images: Vec::new(),
         };
         if let Some(folder) = folder {
             app.load_folder(folder, cx);
@@ -48,18 +95,17 @@ impl PlicApp {
     }
 
     fn load_folder(&mut self, folder: PathBuf, cx: &mut Context<Self>) {
+        self.generation += 1;
+        let old_clips = std::mem::take(&mut self.clips);
+        self.stale_images
+            .extend(old_clips.into_iter().filter_map(|entry| entry.thumbnail));
         match Library::scan(&folder) {
             Ok(library) => {
-                self.clips = library
-                    .clips
-                    .into_iter()
-                    .map(|file| ClipEntry { file })
-                    .collect();
+                self.clips = library.clips.into_iter().map(ClipEntry::new).collect();
                 self.folders = library.folders;
                 self.load_error = None;
             }
             Err(error) => {
-                self.clips.clear();
                 self.folders.clear();
                 self.load_error = Some(format!("{error:#}").into());
             }
@@ -67,7 +113,38 @@ impl PlicApp {
         self.folder = Some(folder);
         self.selected = None;
         self.select(0, cx);
+        for index in 0..self.clips.len() {
+            self.load_details(index, cx);
+        }
         cx.notify();
+    }
+
+    /// Probes a clip and decodes its thumbnail on the worker pool.
+    fn load_details(&mut self, index: usize, cx: &mut Context<Self>) {
+        let path = self.clips[index].file.path.clone();
+        let generation = self.generation;
+        let job = self.workers.run({
+            let path = path.clone();
+            move || inspect(&path)
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok((details, thumbnail)) = job.await else {
+                return;
+            };
+            let thumbnail = thumbnail.and_then(frame_image::render_image);
+            this.update(cx, |this, cx| {
+                if this.generation != generation {
+                    return;
+                }
+                if let Some(entry) = this.clips.iter_mut().find(|entry| entry.file.path == path) {
+                    entry.details = details;
+                    entry.thumbnail = thumbnail;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub(super) fn select(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -239,7 +316,10 @@ impl PlicApp {
 }
 
 impl Render for PlicApp {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        for image in self.stale_images.drain(..) {
+            window.drop_image(image).ok();
+        }
         let theme = cx.theme();
         v_flex()
             .id("plic")
@@ -266,4 +346,21 @@ impl Render for PlicApp {
 
 pub(super) fn display_name(path: &Path) -> SharedString {
     library::display_name(path).into()
+}
+
+/// Reads a clip's metadata and decodes a thumbnail from early in the clip.
+fn inspect(path: &Path) -> (Details, Option<RawFrame>) {
+    let info = match ffmpeg::probe(path) {
+        Ok(info) => info,
+        Err(error) => return (Details::Failed(format!("{error:#}").into()), None),
+    };
+    // A second in skips fade-ins and black intro frames, but stay inside
+    // very short clips.
+    let at = info.duration.map_or(Duration::ZERO, |duration| {
+        (duration / 10).min(Duration::from_secs(1))
+    });
+    let thumbnail = info
+        .video_size
+        .and_then(|size| ffmpeg::extract_keyframe(path, at, size.fit_within(THUMBNAIL_SIZE)).ok());
+    (Details::Ready(info), thumbnail)
 }
