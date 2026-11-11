@@ -315,7 +315,14 @@ fn register_dragging(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // Explicit imports: the `gpui_kit::*` glob would shadow `#[test]` with
+    // GPUI's own test macro.
+    use std::time::Duration;
+
+    use gpui_kit::{Bounds, point, px, size};
+
+    use super::{Drag, HEIGHT, Handles, INSET, Scale};
+    use crate::trim::TrimRange;
 
     fn scale() -> Scale {
         let bounds = Bounds {
