@@ -11,7 +11,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::select::{Select, SelectEvent, SelectState};
+use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Sizable as _, WindowExt as _, h_flex, v_flex,
@@ -24,6 +24,9 @@ use super::library_panel::format_size;
 use crate::{ffmpeg, library, timestamp, trim::TrimRange};
 
 pub const PANEL_WIDTH: f32 = 320.;
+
+/// Destination folder names, filtered as the user types.
+type FolderList = SearchableVec<SharedString>;
 
 /// Which time field an edit came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,7 +41,7 @@ pub struct Editor {
     name: Entity<InputState>,
     start: Entity<InputState>,
     end: Entity<InputState>,
-    folder: Entity<SelectState<Vec<SharedString>>>,
+    folder: Entity<SelectState<FolderList>>,
     /// Why the typed times cannot be used, shown under the fields.
     time_error: Option<SharedString>,
     /// Why the last export attempt was refused, shown under the button.
@@ -51,7 +54,16 @@ impl Editor {
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("Clip name"));
         let start = cx.new(|cx| InputState::new(window, cx).placeholder("0:00"));
         let end = cx.new(|cx| InputState::new(window, cx).placeholder("End of video"));
-        let folder = cx.new(|cx| SelectState::new(Vec::<SharedString>::new(), None, window, cx));
+        // Typing while the list is open filters the folders.
+        let folder = cx.new(|cx| {
+            SelectState::new(
+                FolderList::new(Vec::<SharedString>::new()),
+                None,
+                window,
+                cx,
+            )
+            .searchable(true)
+        });
 
         let subscriptions = vec![
             cx.subscribe_in(&name, window, PlicApp::on_name_event),
@@ -118,7 +130,12 @@ impl PlicApp {
 
     /// Replaces the destination choices after the folder list changed.
     pub(super) fn sync_folder_choices(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let names: Vec<SharedString> = self.folders.iter().map(|path| display_name(path)).collect();
+        let names = FolderList::new(
+            self.folders
+                .iter()
+                .map(|path| display_name(path))
+                .collect::<Vec<_>>(),
+        );
         self.editor
             .folder
             .update(cx, |select, cx| select.set_items(names, window, cx));
@@ -217,8 +234,8 @@ impl PlicApp {
 
     fn on_folder_event(
         &mut self,
-        _: &Entity<SelectState<Vec<SharedString>>>,
-        event: &SelectEvent<Vec<SharedString>>,
+        _: &Entity<SelectState<FolderList>>,
+        event: &SelectEvent<FolderList>,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -562,6 +579,7 @@ impl PlicApp {
                                                 Select::new(&self.editor.folder)
                                                     .small()
                                                     .icon(IconName::Folder)
+                                                    .search_placeholder("Find a folder")
                                                     .placeholder(if has_folders {
                                                         "Choose a folder"
                                                     } else {
