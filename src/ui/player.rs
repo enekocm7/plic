@@ -366,14 +366,6 @@ impl Player {
         }
     }
 
-    pub fn trim(&self) -> TrimRange {
-        self.trim
-    }
-
-    pub fn is_looping(&self) -> bool {
-        self.looping
-    }
-
     /// Replaces the trim range, e.g. after it was typed into the editor.
     pub fn set_trim(&mut self, trim: TrimRange, cx: &mut Context<Self>) {
         if self.trim != trim {

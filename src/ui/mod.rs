@@ -1,7 +1,9 @@
 //! The GPUI front end.
 
 mod app;
+mod editor;
 mod frame_image;
+mod jobs;
 mod library_panel;
 mod player;
 mod timeline;
@@ -36,6 +38,7 @@ actions!(
         ToggleLoop,
         JumpToIn,
         JumpToOut,
+        ExportClip,
         OpenFolder,
         Reload,
         ToggleTheme,
@@ -66,6 +69,8 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-o", JumpToOut, shortcuts),
         KeyBinding::new("x", ResetTrim, shortcuts),
         KeyBinding::new("r", ToggleLoop, shortcuts),
+        // Works from inside the editor's text fields too.
+        KeyBinding::new("ctrl-enter", ExportClip, Some(CONTEXT)),
         KeyBinding::new("ctrl-up", SelectPreviousClip, Some(CONTEXT)),
         KeyBinding::new("ctrl-down", SelectNextClip, Some(CONTEXT)),
         KeyBinding::new("ctrl-o", OpenFolder, Some(CONTEXT)),
@@ -82,6 +87,9 @@ pub fn run(folder: Option<PathBuf>) {
         .with_assets(gpui_kit::assets::AllAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
+            // Probing the hardware encoders takes a moment; do it before the
+            // first export needs it.
+            crate::ffmpeg::warm_up_encoder();
             // Video reads best on a dark surround, whatever the OS theme.
             Theme::change(ThemeMode::Dark, None, cx);
             bind_keys(cx);

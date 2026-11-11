@@ -15,9 +15,12 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use super::{
-    CONTEXT, JumpToEnd, JumpToIn, JumpToOut, JumpToStart, MarkIn, MarkOut, OpenFolder, Reload,
-    ResetTrim, SeekBackward, SeekForward, SelectNextClip, SelectPreviousClip, StepBackward,
-    StepForward, ToggleLoop, ToggleMute, TogglePlay, ToggleTheme, frame_image,
+    CONTEXT, ExportClip, JumpToEnd, JumpToIn, JumpToOut, JumpToStart, MarkIn, MarkOut, OpenFolder,
+    Reload, ResetTrim, SeekBackward, SeekForward, SelectNextClip, SelectPreviousClip, StepBackward,
+    StepForward, ToggleLoop, ToggleMute, TogglePlay, ToggleTheme,
+    editor::Editor,
+    frame_image,
+    jobs::ExportJob,
     player::{Player, PlayerEvent},
 };
 use crate::{
@@ -40,22 +43,38 @@ pub enum Details {
     Failed(SharedString),
 }
 
+/// Where a clip is in the export workflow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipStatus {
+    Pending,
+    Exporting,
+    /// Exported, but the original could not be moved out of the way.
+    Exported,
+}
+
 /// A clip in the library together with everything the UI tracks about it.
+/// The export draft (name, range, folder) is kept while browsing other clips.
 pub struct ClipEntry {
     pub file: ClipFile,
     pub details: Details,
     pub thumbnail: Option<Arc<RenderImage>>,
-    /// The part of the clip to export, kept while browsing other clips.
+    pub name: String,
     pub trim: TrimRange,
+    /// Destination chosen for this clip, if it differs from the default.
+    pub folder: Option<PathBuf>,
+    pub status: ClipStatus,
 }
 
 impl ClipEntry {
     fn new(file: ClipFile) -> Self {
         Self {
+            name: file.stem(),
             file,
             details: Details::Loading,
             thumbnail: None,
             trim: TrimRange::default(),
+            folder: None,
+            status: ClipStatus::Pending,
         }
     }
 
@@ -69,10 +88,15 @@ impl ClipEntry {
 
 pub struct PlicApp {
     focus: FocusHandle,
-    player: Entity<Player>,
-    folder: Option<PathBuf>,
+    pub(super) player: Entity<Player>,
+    pub(super) editor: Editor,
+    /// The clips folder.
+    pub(super) folder: Option<PathBuf>,
     pub(super) clips: Vec<ClipEntry>,
-    folders: Vec<PathBuf>,
+    /// Subfolders that exported clips can be saved into.
+    pub(super) folders: Vec<PathBuf>,
+    /// Destination of the most recent export, the default for the next one.
+    pub(super) last_folder: Option<PathBuf>,
     pub(super) selected: Option<usize>,
     pub(super) list_scroll: UniformListScrollHandle,
     load_error: Option<SharedString>,
@@ -81,34 +105,45 @@ pub struct PlicApp {
     generation: u64,
     /// Images to evict from the GPU atlas on the next frame.
     stale_images: Vec<Arc<RenderImage>>,
+    pub(super) jobs: Vec<ExportJob>,
+    pub(super) next_job_id: u64,
 }
 
 impl PlicApp {
     pub fn new(folder: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
-        focus.focus(window, cx);
+        // Deferred so that setting up the editor's widgets cannot take it.
+        window.defer(cx, {
+            let focus = focus.clone();
+            move |window, cx| focus.focus(window, cx)
+        });
         let player = cx.new(Player::new);
-        cx.subscribe(&player, Self::on_player_event).detach();
+        cx.subscribe_in(&player, window, Self::on_player_event)
+            .detach();
         let mut app = Self {
             focus,
             player,
+            editor: Editor::new(window, cx),
             folder: None,
             clips: Vec::new(),
             folders: Vec::new(),
+            last_folder: None,
             selected: None,
             list_scroll: UniformListScrollHandle::new(),
             load_error: None,
             workers: WorkerPool::new("inspect", 3),
             generation: 0,
             stale_images: Vec::new(),
+            jobs: Vec::new(),
+            next_job_id: 0,
         };
         if let Some(folder) = folder {
-            app.load_folder(folder, cx);
+            app.load_folder(folder, window, cx);
         }
         app
     }
 
-    fn load_folder(&mut self, folder: PathBuf, cx: &mut Context<Self>) {
+    fn load_folder(&mut self, folder: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         self.generation += 1;
         let old_clips = std::mem::take(&mut self.clips);
         self.stale_images
@@ -124,9 +159,23 @@ impl PlicApp {
                 self.load_error = Some(format!("{error:#}").into());
             }
         }
+        // Clips that are still exporting stay marked as such.
+        for entry in &mut self.clips {
+            if self.jobs.iter().any(|job| job.source() == entry.file.path) {
+                entry.status = ClipStatus::Exporting;
+            }
+        }
+        if self.folder.as_ref() != Some(&folder) {
+            self.last_folder = None;
+        }
         self.folder = Some(folder);
+        self.sync_folder_choices(window, cx);
         self.selected = None;
-        self.select(0, cx);
+        self.select(0, window, cx);
+        if self.clips.is_empty() {
+            self.show_selected_in_player(cx);
+            self.sync_editor(window, cx);
+        }
         for index in 0..self.clips.len() {
             self.load_details(index, cx);
         }
@@ -166,7 +215,7 @@ impl PlicApp {
         .detach();
     }
 
-    pub(super) fn select(&mut self, index: usize, cx: &mut Context<Self>) {
+    pub(super) fn select(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if index >= self.clips.len() || self.selected == Some(index) {
             return;
         }
@@ -174,11 +223,38 @@ impl PlicApp {
         self.list_scroll
             .scroll_to_item(index, ScrollStrategy::Nearest);
         self.show_selected_in_player(cx);
+        self.sync_editor(window, cx);
+        cx.notify();
+    }
+
+    /// Drops a clip from the list, e.g. once it has been exported and moved
+    /// away, and selects its neighbour.
+    pub(super) fn remove_clip(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let entry = self.clips.remove(index);
+        self.stale_images.extend(entry.thumbnail);
+        match self.selected {
+            Some(selected) if selected > index => self.selected = Some(selected - 1),
+            Some(selected) if selected == index => {
+                self.selected = None;
+                if self.clips.is_empty() {
+                    self.show_selected_in_player(cx);
+                    self.sync_editor(window, cx);
+                } else {
+                    self.select(index.min(self.clips.len() - 1), window, cx);
+                }
+            }
+            _ => {}
+        }
         cx.notify();
     }
 
     /// Loads the selected clip into the player once its details are known.
-    fn show_selected_in_player(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn show_selected_in_player(&mut self, cx: &mut Context<Self>) {
         let Some(entry) = self.current() else {
             self.player.update(cx, |player, cx| player.clear(cx));
             return;
@@ -199,15 +275,26 @@ impl PlicApp {
         }
     }
 
-    fn on_player_event(&mut self, _: Entity<Player>, event: &PlayerEvent, cx: &mut Context<Self>) {
+    fn on_player_event(
+        &mut self,
+        _: &Entity<Player>,
+        event: &PlayerEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match event {
             PlayerEvent::TrimChanged(trim) => {
                 if let Some(entry) = self.current_mut() {
                     entry.trim = *trim;
+                    self.sync_time_fields(window, cx);
                     cx.notify();
                 }
             }
         }
+    }
+
+    fn export_clip(&mut self, _: &ExportClip, window: &mut Window, cx: &mut Context<Self>) {
+        self.export_current(window, cx);
     }
 
     fn mark_in(&mut self, _: &MarkIn, _: &mut Window, cx: &mut Context<Self>) {
@@ -278,15 +365,20 @@ impl PlicApp {
         });
     }
 
-    fn select_previous(&mut self, _: &SelectPreviousClip, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_previous(
+        &mut self,
+        _: &SelectPreviousClip,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(selected) = self.selected {
-            self.select(selected.saturating_sub(1), cx);
+            self.select(selected.saturating_sub(1), window, cx);
         }
     }
 
-    fn select_next(&mut self, _: &SelectNextClip, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_next(&mut self, _: &SelectNextClip, window: &mut Window, cx: &mut Context<Self>) {
         let next = self.selected.map_or(0, |selected| selected + 1);
-        self.select(next, cx);
+        self.select(next, window, cx);
     }
 
     fn open_folder(&mut self, _: &OpenFolder, window: &mut Window, cx: &mut Context<Self>) {
@@ -301,20 +393,19 @@ impl PlicApp {
                 return;
             };
             if let Some(folder) = paths.into_iter().next() {
-                this.update(cx, |this, cx| this.load_folder(folder, cx))
+                this.update_in(cx, |this, window, cx| this.load_folder(folder, window, cx))
                     .ok();
             }
         })
         .detach();
     }
 
-    fn reload(&mut self, _: &Reload, _: &mut Window, cx: &mut Context<Self>) {
+    fn reload(&mut self, _: &Reload, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(folder) = self.folder.clone() {
             let current = self.current().map(|entry| entry.file.path.clone());
-            self.load_folder(folder, cx);
+            self.load_folder(folder, window, cx);
             if let Some(index) = current.and_then(|path| self.index_of(&path)) {
-                self.selected = None;
-                self.select(index, cx);
+                self.select(index, window, cx);
             }
         }
     }
@@ -336,7 +427,7 @@ impl PlicApp {
         self.clips.get_mut(self.selected?)
     }
 
-    fn index_of(&self, path: &Path) -> Option<usize> {
+    pub(super) fn index_of(&self, path: &Path) -> Option<usize> {
         self.clips.iter().position(|entry| entry.file.path == path)
     }
 
@@ -452,13 +543,27 @@ impl Render for PlicApp {
             .on_action(cx.listener(Self::toggle_loop))
             .on_action(cx.listener(Self::jump_to_in))
             .on_action(cx.listener(Self::jump_to_out))
+            .on_action(cx.listener(Self::export_clip))
             .child(self.render_title_bar(cx))
             .child(
                 h_flex()
                     .flex_1()
                     .min_h_0()
                     .child(self.render_library(cx))
-                    .child(div().flex_1().min_w_0().h_full().child(self.player.clone())),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            // Clicking the video leaves a text field, so the
+                            // single-key shortcuts work again.
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, window, cx| this.focus.focus(window, cx)),
+                            )
+                            .child(self.player.clone()),
+                    )
+                    .child(self.render_export_panel(cx)),
             )
     }
 }

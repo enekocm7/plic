@@ -8,7 +8,7 @@ use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, Theme, h_flex, v
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use super::app::{ClipEntry, Details, PlicApp};
+use super::app::{ClipEntry, ClipStatus, Details, PlicApp};
 use crate::timestamp;
 
 const PANEL_WIDTH: f32 = 280.;
@@ -79,7 +79,9 @@ impl PlicApp {
                     .cursor_pointer()
                     .when(selected, |row| row.bg(theme.sidebar_accent))
                     .when(!selected, |row| row.hover(|row| row.bg(theme.list_hover)))
-                    .on_click(cx.listener(move |this, _, _, cx| this.select(index, cx)))
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| this.select(index, window, cx)),
+                    )
                     .child(render_thumbnail(entry, &theme))
                     .child(
                         v_flex()
@@ -95,13 +97,22 @@ impl PlicApp {
                                     })
                                     .child(entry.file.file_name()),
                             )
-                            .child(
-                                div()
+                            .child(match entry.status {
+                                ClipStatus::Pending => div()
                                     .text_xs()
                                     .text_color(theme.muted_foreground)
                                     .truncate()
-                                    .child(subtitle(entry)),
-                            ),
+                                    .child(subtitle(entry))
+                                    .into_any_element(),
+                                ClipStatus::Exporting => render_status(
+                                    IconName::LoaderCircle,
+                                    "Exporting",
+                                    theme.primary,
+                                ),
+                                ClipStatus::Exported => {
+                                    render_status(IconName::CircleCheck, "Exported", theme.success)
+                                }
+                            }),
                     );
                 // Padding outside the row keeps the highlight off the panel edges.
                 Some(
@@ -165,6 +176,16 @@ fn render_thumbnail(entry: &ClipEntry, theme: &Theme) -> impl IntoElement {
                     .child(duration),
             )
         })
+}
+
+fn render_status(icon: IconName, label: &'static str, color: Hsla) -> AnyElement {
+    h_flex()
+        .gap_1()
+        .text_xs()
+        .text_color(color)
+        .child(Icon::new(icon).xsmall())
+        .child(label)
+        .into_any_element()
 }
 
 /// `1080p60 · 22 MB`, or why the clip could not be read.
