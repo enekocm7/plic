@@ -17,9 +17,9 @@ use gpui_kit::*;
 
 use super::{
     AddSegment, CONTEXT, DeleteClip, ExportClip, JumpToEnd, JumpToIn, JumpToOut, JumpToStart,
-    MarkIn, MarkOut, OpenFolder, Reload, ResetTrim, SeekBackward, SeekForward, SelectNextClip,
-    SelectPreviousClip, ShowShortcuts, SplitAtPlayhead, StepBackward, StepForward, ToggleLoop,
-    ToggleMute, TogglePlay, ToggleTheme,
+    MarkIn, MarkOut, OpenFolder, Reload, ResetTrim, SaveFrame, SaveFrameJpeg, SeekBackward,
+    SeekForward, SelectNextClip, SelectPreviousClip, ShowShortcuts, SplitAtPlayhead, StepBackward,
+    StepForward, ToggleLoop, ToggleMute, TogglePlay, ToggleTheme,
     editor::Editor,
     frame_image,
     jobs::ExportJob,
@@ -117,7 +117,7 @@ impl ClipEntry {
 }
 
 pub struct PlicApp {
-    focus: FocusHandle,
+    pub(super) focus: FocusHandle,
     pub(super) player: Entity<Player>,
     pub(super) editor: Editor,
     /// The clips folder.
@@ -504,6 +504,14 @@ impl PlicApp {
         self.add_segment(window, cx);
     }
 
+    fn save_frame_png(&mut self, _: &SaveFrame, window: &mut Window, cx: &mut Context<Self>) {
+        self.save_frame(ffmpeg::ImageFormat::Png, window, cx);
+    }
+
+    fn save_frame_jpeg(&mut self, _: &SaveFrameJpeg, window: &mut Window, cx: &mut Context<Self>) {
+        self.save_frame(ffmpeg::ImageFormat::Jpeg, window, cx);
+    }
+
     fn split_action(&mut self, _: &SplitAtPlayhead, window: &mut Window, cx: &mut Context<Self>) {
         self.split_at_playhead(window, cx);
     }
@@ -799,6 +807,8 @@ impl Render for PlicApp {
             .on_action(cx.listener(Self::reset_trim))
             .on_action(cx.listener(Self::add_segment_action))
             .on_action(cx.listener(Self::split_action))
+            .on_action(cx.listener(Self::save_frame_png))
+            .on_action(cx.listener(Self::save_frame_jpeg))
             .on_action(cx.listener(Self::toggle_loop))
             .on_action(cx.listener(Self::jump_to_in))
             .on_action(cx.listener(Self::jump_to_out))

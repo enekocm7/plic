@@ -2,7 +2,7 @@
 //! done with the file itself.
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _, DropdownButton};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Sizable as _, WindowExt as _, h_flex,
@@ -12,7 +12,8 @@ use gpui_kit::*;
 
 use super::app::{ClipEntry, ClipStatus, PlicApp};
 use super::library_panel::format_size;
-use crate::{library, timestamp};
+use super::{SaveFrame, SaveFrameJpeg};
+use crate::{ffmpeg, library, timestamp};
 
 pub const HEADER_HEIGHT: f32 = 40.;
 
@@ -29,6 +30,68 @@ impl PlicApp {
                 cx,
             );
         }
+    }
+
+    /// Saves the frame under the playhead next to the exports: in the
+    /// clip's destination folder, else the clips folder.
+    pub(super) fn save_frame(
+        &mut self,
+        format: ffmpeg::ImageFormat,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(entry) = self.viewed() else {
+            return;
+        };
+        let Some(folder) = self
+            .destination(entry)
+            .map(|folder| folder.to_path_buf())
+            .or_else(|| self.folder.clone())
+        else {
+            return;
+        };
+        let source = entry.file.path.clone();
+        let at = self.player.read(cx).position();
+        let stem = ffmpeg::frame_file_stem(&entry.file.stem(), at);
+        let extension = format.extension();
+        // Never overwrite: number the name until it is free.
+        let output = (1..)
+            .map(|copy| match copy {
+                1 => folder.join(format!("{stem}.{extension}")),
+                copy => folder.join(format!("{stem} ({copy}).{extension}")),
+            })
+            .find(|path| !path.exists())
+            .expect("an unused name");
+
+        let task = cx.background_spawn({
+            let output = output.clone();
+            async move { ffmpeg::save_frame(&source, at, &output, format) }
+        });
+        cx.spawn_in(window, async move |_, cx| {
+            let result = task.await;
+            cx.update(|window, cx| match result {
+                Ok(()) => {
+                    let name = output
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    let folder = output
+                        .parent()
+                        .map(library::display_name)
+                        .unwrap_or_default();
+                    window.push_notification(
+                        Notification::success(format!("{name} in {folder}")).title("Frame saved"),
+                        cx,
+                    );
+                }
+                Err(error) => window.push_notification(
+                    Notification::error(format!("{error:#}")).title("Could not save the frame"),
+                    cx,
+                ),
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub(super) fn show_in_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -208,6 +271,26 @@ impl PlicApp {
                                     this.restore_settled(window, cx)
                                 })),
                         )
+                    })
+                    .child({
+                        let focus = self.focus.clone();
+                        DropdownButton::new("save-frame")
+                            .ghost()
+                            .small()
+                            .button(
+                                Button::new("save-frame-png")
+                                    .icon(IconName::Camera)
+                                    .tooltip("Save this frame as PNG (Ctrl+Shift+S)")
+                                    .disabled(!enabled)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.save_frame(ffmpeg::ImageFormat::Png, window, cx)
+                                    })),
+                            )
+                            .dropdown_menu(move |menu, _, _| {
+                                menu.action_context(focus.clone())
+                                    .menu("Save as PNG", Box::new(SaveFrame))
+                                    .menu("Save as JPEG", Box::new(SaveFrameJpeg))
+                            })
                     })
                     .child(
                         Button::new("open-externally")

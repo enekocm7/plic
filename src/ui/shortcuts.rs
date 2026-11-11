@@ -41,6 +41,10 @@ const GROUPS: &[Group] = &[
         &[
             (&["up", "down"], "Previous or next clip"),
             (&["ctrl-enter"], "Export"),
+            (
+                &["ctrl-shift-s", "ctrl-alt-s"],
+                "Save the frame as PNG or JPEG",
+            ),
             (&["delete"], "Delete"),
             (&["ctrl-o"], "Open a folder"),
             (&["f5"], "Rescan the folder"),

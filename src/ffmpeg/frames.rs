@@ -84,6 +84,58 @@ pub fn extract_keyframe(path: &Path, at: Duration, size: FrameSize) -> Result<Ra
     fast_seek(true).or_else(|_| fast_seek(false))
 }
 
+/// An image file format for saved frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageFormat {
+    Png,
+    Jpeg,
+}
+
+impl ImageFormat {
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Png => "png",
+            Self::Jpeg => "jpg",
+        }
+    }
+}
+
+/// Writes the frame shown at `at` to `output` at full resolution. Fails
+/// rather than overwrite an existing file.
+pub fn save_frame(path: &Path, at: Duration, output: &Path, format: ImageFormat) -> Result<()> {
+    let mut command = base_command();
+    command
+        .arg("-ss")
+        .arg(seconds_arg(at))
+        .arg("-i")
+        .arg(path)
+        .args(["-an", "-sn", "-frames:v", "1", "-update", "1", "-n"]);
+    if format == ImageFormat::Jpeg {
+        // Near the top of ffmpeg's 2 (best) to 31 (worst) JPEG scale.
+        command.args(["-q:v", "2"]);
+    }
+    let result = command
+        .arg(output)
+        .no_window()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .context("could not start ffmpeg; check that it is installed and on PATH")?;
+    if !result.status.success() || !output.exists() {
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        bail!("could not save the frame: {}", stderr.trim());
+    }
+    Ok(())
+}
+
+/// `clip-01m12s345`: a file name for the frame of `stem` at `at`.
+pub fn frame_file_stem(stem: &str, at: Duration) -> String {
+    let millis = at.as_millis();
+    let (minutes, seconds, millis) = (millis / 60_000, millis / 1000 % 60, millis % 1000);
+    format!("{stem}-{minutes:02}m{seconds:02}s{millis:03}")
+}
+
 fn base_command() -> Command {
     let mut command = Command::new("ffmpeg");
     command.args(["-hide_banner", "-loglevel", "error", "-nostdin"]);
@@ -236,6 +288,18 @@ fn read_frames(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_frames_by_their_time() {
+        assert_eq!(
+            frame_file_stem("match", Duration::from_millis(72_345)),
+            "match-01m12s345"
+        );
+        assert_eq!(
+            frame_file_stem("a", Duration::from_secs(3_600)),
+            "a-60m00s000"
+        );
+    }
 
     #[test]
     fn fits_without_upscaling_and_keeps_even_dimensions() {
