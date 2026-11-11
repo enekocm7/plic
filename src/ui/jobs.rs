@@ -95,14 +95,23 @@ impl PlicApp {
             .destination(entry)
             .ok_or("Create a destination folder first")?;
 
-        let ranges = entry.segments.in_order();
-        let parts: Vec<(String, Vec<_>)> = if ranges.len() == 1 || self.editor.join {
-            vec![(name, ranges)]
+        let parts: Vec<(String, Vec<_>)> = if entry.segments.len() == 1 || self.editor.join {
+            vec![(name, entry.segments.in_order())]
         } else {
-            ranges
+            let parts = entry.segments.named_parts(&name);
+            for (index, (part, _)) in parts.iter().enumerate() {
+                library::validate_file_stem(part)
+                    .map_err(|error| format!("Part {}: {error}", index + 1))?;
+                if parts[..index]
+                    .iter()
+                    .any(|(other, _)| other.eq_ignore_ascii_case(part))
+                {
+                    return Err(format!("Two parts are called {part}").into());
+                }
+            }
+            parts
                 .into_iter()
-                .enumerate()
-                .map(|(index, range)| (part_name(&name, index), vec![range]))
+                .map(|(part, range)| (part, vec![range]))
                 .collect()
         };
 
@@ -407,9 +416,4 @@ impl PlicApp {
             )
             .child(Progress::new(("job-progress", id)).value(job.progress.unwrap_or(0.0) * 100.0))
     }
-}
-
-/// `name-1`, `name-2`, …: the file name of one of several separate parts.
-fn part_name(name: &str, index: usize) -> String {
-    format!("{name}-{}", index + 1)
 }

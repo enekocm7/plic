@@ -416,6 +416,17 @@ impl Player {
         true
     }
 
+    /// Names the active segment, e.g. after it was typed into the editor.
+    pub fn set_segment_name(&mut self, name: String) {
+        self.segments.set_active_name(name);
+    }
+
+    /// Cuts the segment under the playhead in two.
+    pub fn split_at_playhead(&mut self, cx: &mut Context<Self>) -> bool {
+        let (at, duration) = (self.position(), self.duration());
+        self.change_segments(|segments| segments.split(at, duration), cx)
+    }
+
     /// Starts a new segment at the playhead.
     pub fn add_segment(&mut self, cx: &mut Context<Self>) -> bool {
         let (at, duration) = (self.position(), self.duration());
