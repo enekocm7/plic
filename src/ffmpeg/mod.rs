@@ -9,7 +9,9 @@ mod probe;
 
 use std::{process::Command, time::Duration};
 
-pub use export::{CancelToken, ExportError, ExportRequest, export, warm_up_encoder};
+pub use export::{
+    CancelToken, ExportError, ExportRequest, estimated_size, export, warm_up_encoder,
+};
 pub use frames::{FrameSize, RawFrame, VideoStream, extract_frame, extract_keyframe};
 pub use probe::{MediaInfo, probe};
 

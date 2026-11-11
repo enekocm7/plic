@@ -148,6 +148,17 @@ impl From<anyhow::Error> for ExportError {
     }
 }
 
+/// Roughly how large an export of `length` from a source of `source_bytes`
+/// and `source_duration` will be. Exports are encoded at constant quality,
+/// so the source's average bitrate is the best cheap guess.
+pub fn estimated_size(source_bytes: u64, source_duration: Duration, length: Duration) -> u64 {
+    if source_duration.is_zero() {
+        return 0;
+    }
+    let fraction = (length.as_secs_f64() / source_duration.as_secs_f64()).clamp(0.0, 1.0);
+    (source_bytes as f64 * fraction).round() as u64
+}
+
 /// Runs ffmpeg for `request`, calling `on_progress` with a fraction in
 /// `0.0..=1.0` as encoding advances. Blocks until the export finishes.
 pub fn export(
@@ -342,6 +353,18 @@ fn publish(temporary: &Path, output: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn estimates_size_from_the_source_bitrate() {
+        let mb = 1024 * 1024;
+        let minute = Duration::from_secs(60);
+        assert_eq!(
+            estimated_size(60 * mb, minute, Duration::from_secs(15)),
+            15 * mb
+        );
+        assert_eq!(estimated_size(60 * mb, minute, minute * 2), 60 * mb);
+        assert_eq!(estimated_size(60 * mb, Duration::ZERO, minute), 0);
+    }
 
     #[test]
     fn reads_progress_lines() {

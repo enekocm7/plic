@@ -12,14 +12,16 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use super::app::{ClipEntry, ClipStatus, PlicApp, display_name};
-use crate::{library, timestamp, trim::TrimRange};
+use super::library_panel::format_size;
+use crate::{ffmpeg, library, timestamp, trim::TrimRange};
 
 pub const PANEL_WIDTH: f32 = 320.;
 
@@ -420,33 +422,53 @@ impl PlicApp {
         };
 
         let length = trim.length(duration);
-        let summary = v_flex()
-            .gap_1()
-            .p_3()
-            .rounded(theme.radius_lg)
+        let estimate = entry
+            .zip(duration)
+            .zip(length)
+            .map(|((entry, duration), length)| {
+                format_size(ffmpeg::estimated_size(entry.file.size, duration, length))
+            });
+        // One compact line: kept length, out of how much, and the likely size.
+        let summary = h_flex()
+            .h(px(36.))
+            .px_3()
+            .gap_2()
+            .rounded(theme.radius)
             .bg(theme.muted)
-            .child(label("LENGTH"))
+            .text_sm()
             .child(
-                h_flex()
-                    .items_baseline()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_2xl()
-                            .font_family(theme.mono_font_family.clone())
-                            .text_color(theme.foreground)
-                            .child(length.map_or("--:--".into(), timestamp::format_precise)),
-                    )
-                    .when_some(duration, |row, duration| {
-                        row.child(div().text_xs().text_color(theme.muted_foreground).child(
-                            if trim.is_full(Some(duration)) {
-                                "whole clip".to_string()
-                            } else {
-                                format!("of {}", timestamp::format_precise(duration))
-                            },
-                        ))
-                    }),
-            );
+                Icon::new(IconName::Timer)
+                    .small()
+                    .text_color(theme.muted_foreground),
+            )
+            .child(
+                div()
+                    .font_family(theme.mono_font_family.clone())
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(length.map_or("--:--".into(), timestamp::format_precise)),
+            )
+            .when_some(duration, |row, duration| {
+                row.child(div().text_xs().text_color(theme.muted_foreground).child(
+                    if trim.is_full(Some(duration)) {
+                        "whole clip".to_string()
+                    } else {
+                        format!("of {}", timestamp::format_coarse(duration))
+                    },
+                ))
+            })
+            .child(div().flex_1())
+            .when_some(estimate, |row, estimate| {
+                row.child(
+                    div()
+                        .id("estimated-size")
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(format!("≈ {estimate}"))
+                        .tooltip(|window, cx| {
+                            Tooltip::new("Estimated from the original's bitrate").build(window, cx)
+                        }),
+                )
+            });
 
         let output_preview = match (&destination, output_name.is_empty()) {
             (Some(folder), false) => Some(format!(
