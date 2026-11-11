@@ -100,7 +100,7 @@ pub struct PlicApp {
     pub(super) last_folder: Option<PathBuf>,
     pub(super) selected: Option<usize>,
     pub(super) list_scroll: UniformListScrollHandle,
-    load_error: Option<SharedString>,
+    pub(super) load_error: Option<SharedString>,
     workers: WorkerPool,
     /// Bumped on every folder load so results for an old folder are ignored.
     generation: u64,

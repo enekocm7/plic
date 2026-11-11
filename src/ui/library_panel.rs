@@ -3,13 +3,15 @@
 use std::ops::Range;
 
 use gpui_kit::assets::IconName;
+use gpui_kit::component::button::Button;
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, Theme, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use super::OpenFolder;
 use super::app::{ClipEntry, ClipStatus, Details, PlicApp};
-use crate::timestamp;
+use crate::{library, timestamp};
 
 const PANEL_WIDTH: f32 = 280.;
 const ROW_HEIGHT: f32 = 64.;
@@ -45,17 +47,75 @@ impl PlicApp {
                             .child(count.to_string()),
                     ),
             )
+            .map(|panel| {
+                if count == 0 {
+                    return panel.child(self.render_empty_library(cx));
+                }
+                panel.child(
+                    div()
+                        .relative()
+                        .flex_1()
+                        .min_h_0()
+                        .child(
+                            uniform_list("clips", count, cx.processor(Self::render_clip_rows))
+                                .size_full()
+                                .track_scroll(&self.list_scroll),
+                        )
+                        .child(Scrollbar::vertical(&self.list_scroll)),
+                )
+            })
+    }
+
+    /// Explains why the list is empty and offers a way forward.
+    fn render_empty_library(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (icon, title, message): (_, &str, SharedString) = match (&self.folder, &self.load_error)
+        {
+            (None, _) => (
+                IconName::FolderOpen,
+                "No folder open",
+                "Open the folder your recordings are saved to.".into(),
+            ),
+            (Some(_), Some(error)) => (
+                IconName::CircleAlert,
+                "Could not read this folder",
+                error.clone(),
+            ),
+            (Some(_), None) => (
+                IconName::Clapperboard,
+                "No clips here",
+                format!(
+                    "Videos saved directly in this folder show up here. \
+                     Originals move to the \"{}\" folder once exported.",
+                    library::EDITED_DIR
+                )
+                .into(),
+            ),
+        };
+        v_flex()
+            .flex_1()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .px_6()
+            .pb_10()
+            .text_center()
+            .child(Icon::new(icon).large().text_color(theme.muted_foreground))
+            .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(title))
             .child(
                 div()
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .child(
-                        uniform_list("clips", count, cx.processor(Self::render_clip_rows))
-                            .size_full()
-                            .track_scroll(&self.list_scroll),
-                    )
-                    .child(Scrollbar::vertical(&self.list_scroll)),
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(message),
+            )
+            .child(
+                Button::new("empty-open-folder")
+                    .outline()
+                    .small()
+                    .mt_2()
+                    .icon(IconName::FolderOpen)
+                    .label("Open folder")
+                    .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenFolder), cx)),
             )
     }
 
