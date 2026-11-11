@@ -98,8 +98,18 @@ pub struct PlicApp {
     pub(super) folders: Vec<PathBuf>,
     /// Destination of the most recent export, the default for the next one.
     pub(super) last_folder: Option<PathBuf>,
+    /// The selected clip still to be edited. At most one of this and
+    /// `settled_selected` is set.
     pub(super) selected: Option<usize>,
     pub(super) list_scroll: UniformListScrollHandle,
+    /// Originals already exported, shown in the collapsible Settled list.
+    pub(super) settled: Vec<ClipEntry>,
+    pub(super) settled_selected: Option<usize>,
+    pub(super) settled_open: bool,
+    pub(super) settled_scroll: UniformListScrollHandle,
+    /// Whether the settled clips' details have been requested; they are only
+    /// loaded once the list is first opened.
+    settled_loaded: bool,
     pub(super) load_error: Option<SharedString>,
     workers: WorkerPool,
     /// Bumped on every folder load so results for an old folder are ignored.
@@ -131,6 +141,11 @@ impl PlicApp {
             last_folder: None,
             selected: None,
             list_scroll: UniformListScrollHandle::new(),
+            settled: Vec::new(),
+            settled_selected: None,
+            settled_open: false,
+            settled_scroll: UniformListScrollHandle::new(),
+            settled_loaded: false,
             load_error: None,
             workers: WorkerPool::new("inspect", 3),
             generation: 0,
@@ -146,12 +161,15 @@ impl PlicApp {
 
     fn load_folder(&mut self, folder: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         self.generation += 1;
-        let old_clips = std::mem::take(&mut self.clips);
+        let old_entries = std::mem::take(&mut self.clips)
+            .into_iter()
+            .chain(std::mem::take(&mut self.settled));
         self.stale_images
-            .extend(old_clips.into_iter().filter_map(|entry| entry.thumbnail));
+            .extend(old_entries.filter_map(|entry| entry.thumbnail));
         match Library::scan(&folder) {
             Ok(library) => {
                 self.clips = library.clips.into_iter().map(ClipEntry::new).collect();
+                self.settled = library.settled.into_iter().map(ClipEntry::new).collect();
                 self.folders = library.folders;
                 self.load_error = None;
             }
@@ -172,20 +190,52 @@ impl PlicApp {
         self.folder = Some(folder);
         self.sync_folder_choices(window, cx);
         self.selected = None;
+        self.settled_selected = None;
         self.select(0, window, cx);
         if self.clips.is_empty() {
             self.show_selected_in_player(cx);
             self.sync_editor(window, cx);
         }
-        for index in 0..self.clips.len() {
-            self.load_details(index, cx);
+        let paths: Vec<_> = self
+            .clips
+            .iter()
+            .map(|entry| entry.file.path.clone())
+            .collect();
+        for path in paths {
+            self.load_details(path, cx);
+        }
+        self.settled_loaded = false;
+        if self.settled_open {
+            self.load_settled_details(cx);
+        }
+        cx.notify();
+    }
+
+    fn load_settled_details(&mut self, cx: &mut Context<Self>) {
+        if std::mem::replace(&mut self.settled_loaded, true) {
+            return;
+        }
+        let paths: Vec<_> = self
+            .settled
+            .iter()
+            .filter(|entry| matches!(entry.details, Details::Loading))
+            .map(|entry| entry.file.path.clone())
+            .collect();
+        for path in paths {
+            self.load_details(path, cx);
+        }
+    }
+
+    pub(super) fn toggle_settled(&mut self, cx: &mut Context<Self>) {
+        self.settled_open = !self.settled_open;
+        if self.settled_open {
+            self.load_settled_details(cx);
         }
         cx.notify();
     }
 
     /// Probes a clip and decodes its thumbnail on the worker pool.
-    fn load_details(&mut self, index: usize, cx: &mut Context<Self>) {
-        let path = self.clips[index].file.path.clone();
+    fn load_details(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let generation = self.generation;
         let job = self.workers.run({
             let path = path.clone();
@@ -200,13 +250,12 @@ impl PlicApp {
                 if this.generation != generation {
                     return;
                 }
-                let Some(index) = this.index_of(&path) else {
+                let Some(entry) = this.entry_mut(&path) else {
                     return;
                 };
-                let entry = &mut this.clips[index];
                 entry.details = details;
                 entry.thumbnail = thumbnail;
-                if this.selected == Some(index) {
+                if this.viewed().is_some_and(|entry| entry.file.path == path) {
                     this.show_selected_in_player(cx);
                 }
                 cx.notify();
@@ -221,6 +270,7 @@ impl PlicApp {
             return;
         }
         self.selected = Some(index);
+        self.settled_selected = None;
         self.list_scroll
             .scroll_to_item(index, ScrollStrategy::Nearest);
         self.show_selected_in_player(cx);
@@ -228,16 +278,35 @@ impl PlicApp {
         cx.notify();
     }
 
-    /// Drops a clip from the list, e.g. once it has been exported and moved
-    /// away, and selects its neighbour.
-    pub(super) fn remove_clip(
+    /// Previews an exported original. The export panel stays hidden, as
+    /// there is nothing left to export.
+    pub(super) fn select_settled(
         &mut self,
         index: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if index >= self.settled.len() || self.settled_selected == Some(index) {
+            return;
+        }
+        self.settled_selected = Some(index);
+        self.selected = None;
+        self.settled_scroll
+            .scroll_to_item(index, ScrollStrategy::Nearest);
+        self.show_selected_in_player(cx);
+        self.sync_editor(window, cx);
+        cx.notify();
+    }
+
+    /// Takes a clip out of the list, e.g. once it has been exported and moved
+    /// away, and selects its neighbour if it was selected.
+    pub(super) fn take_clip(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> ClipEntry {
         let entry = self.clips.remove(index);
-        self.stale_images.extend(entry.thumbnail);
         match self.selected {
             Some(selected) if selected > index => self.selected = Some(selected - 1),
             Some(selected) if selected == index => {
@@ -252,15 +321,92 @@ impl PlicApp {
             _ => {}
         }
         cx.notify();
+        entry
+    }
+
+    /// Takes an exported original out of the Settled list.
+    pub(super) fn take_settled(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> ClipEntry {
+        let entry = self.settled.remove(index);
+        match self.settled_selected {
+            Some(selected) if selected > index => self.settled_selected = Some(selected - 1),
+            Some(selected) if selected == index => {
+                self.settled_selected = None;
+                if self.settled.is_empty() {
+                    self.show_selected_in_player(cx);
+                    self.sync_editor(window, cx);
+                } else {
+                    self.select_settled(index.min(self.settled.len() - 1), window, cx);
+                }
+            }
+            _ => {}
+        }
+        cx.notify();
+        entry
+    }
+
+    /// Removes a clip from whichever list holds it and frees its thumbnail.
+    pub(super) fn forget(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        let entry = if let Some(index) = self.index_of(path) {
+            self.take_clip(index, window, cx)
+        } else if let Some(index) = self.settled_index_of(path) {
+            self.take_settled(index, window, cx)
+        } else {
+            return;
+        };
+        self.stale_images.extend(entry.thumbnail);
+    }
+
+    /// Files an exported clip under Settled, now living at `archived`.
+    pub(super) fn settle(&mut self, mut entry: ClipEntry, archived: PathBuf) {
+        entry.file.path = archived;
+        entry.status = ClipStatus::Pending;
+        entry.trim = TrimRange::default();
+        self.settled.insert(0, entry);
+        if let Some(selected) = &mut self.settled_selected {
+            *selected += 1;
+        }
+    }
+
+    /// Puts a restored original back among the clips to edit, and selects it.
+    pub(super) fn unsettle(
+        &mut self,
+        index: usize,
+        restored: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut entry = self.take_settled(index, window, cx);
+        entry.file.path = restored;
+        entry.name = entry.file.stem();
+        let key = entry.file.file_name().to_lowercase();
+        let position = self
+            .clips
+            .partition_point(|clip| clip.file.file_name().to_lowercase() < key);
+        self.clips.insert(position, entry);
+        if let Some(selected) = &mut self.selected
+            && *selected >= position
+        {
+            *selected += 1;
+        }
+        self.selected = None;
+        self.select(position, window, cx);
     }
 
     /// Loads the selected clip into the player once its details are known.
     pub(super) fn show_selected_in_player(&mut self, cx: &mut Context<Self>) {
-        let Some(entry) = self.current() else {
+        let Some(entry) = self.viewed() else {
             self.player.update(cx, |player, cx| player.clear(cx));
             return;
         };
         let path = entry.file.path.clone();
+        let trimmable = !self.is_viewing_settled();
+        self.player
+            .update(cx, |player, cx| player.set_trimmable(trimmable, cx));
         match &entry.details {
             Details::Ready(info) => {
                 let (info, trim) = (info.clone(), entry.trim);
@@ -376,14 +522,20 @@ impl PlicApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(selected) = self.selected {
+        if let Some(selected) = self.settled_selected {
+            self.select_settled(selected.saturating_sub(1), window, cx);
+        } else if let Some(selected) = self.selected {
             self.select(selected.saturating_sub(1), window, cx);
         }
     }
 
     fn select_next(&mut self, _: &SelectNextClip, window: &mut Window, cx: &mut Context<Self>) {
-        let next = self.selected.map_or(0, |selected| selected + 1);
-        self.select(next, window, cx);
+        if let Some(selected) = self.settled_selected {
+            self.select_settled(selected + 1, window, cx);
+        } else {
+            let next = self.selected.map_or(0, |selected| selected + 1);
+            self.select(next, window, cx);
+        }
     }
 
     fn open_folder(&mut self, _: &OpenFolder, window: &mut Window, cx: &mut Context<Self>) {
@@ -407,10 +559,14 @@ impl PlicApp {
 
     fn reload(&mut self, _: &Reload, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(folder) = self.folder.clone() {
-            let current = self.current().map(|entry| entry.file.path.clone());
+            let viewed = self.viewed().map(|entry| entry.file.path.clone());
             self.load_folder(folder, window, cx);
-            if let Some(index) = current.and_then(|path| self.index_of(&path)) {
-                self.select(index, window, cx);
+            if let Some(path) = viewed {
+                if let Some(index) = self.index_of(&path) {
+                    self.select(index, window, cx);
+                } else if let Some(index) = self.settled_index_of(&path) {
+                    self.select_settled(index, window, cx);
+                }
             }
         }
     }
@@ -436,8 +592,33 @@ impl PlicApp {
         self.clips.get_mut(self.selected?)
     }
 
+    /// The clip shown in the viewer: the selected clip or settled original.
+    pub(super) fn viewed(&self) -> Option<&ClipEntry> {
+        match self.settled_selected {
+            Some(index) => self.settled.get(index),
+            None => self.current(),
+        }
+    }
+
+    pub(super) fn is_viewing_settled(&self) -> bool {
+        self.settled_selected.is_some()
+    }
+
+    fn entry_mut(&mut self, path: &Path) -> Option<&mut ClipEntry> {
+        self.clips
+            .iter_mut()
+            .chain(&mut self.settled)
+            .find(|entry| entry.file.path == path)
+    }
+
     pub(super) fn index_of(&self, path: &Path) -> Option<usize> {
         self.clips.iter().position(|entry| entry.file.path == path)
+    }
+
+    pub(super) fn settled_index_of(&self, path: &Path) -> Option<usize> {
+        self.settled
+            .iter()
+            .position(|entry| entry.file.path == path)
     }
 
     fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -587,7 +768,7 @@ impl Render for PlicApp {
                                 MouseButton::Left,
                                 cx.listener(|this, _, window, cx| this.focus.focus(window, cx)),
                             )
-                            .when(self.current().is_some(), |column| {
+                            .when(self.viewed().is_some(), |column| {
                                 column.child(self.render_clip_header(cx))
                             })
                             .child(div().flex_1().min_h_0().child(self.player.clone())),

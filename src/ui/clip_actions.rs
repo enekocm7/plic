@@ -18,7 +18,7 @@ pub const HEADER_HEIGHT: f32 = 40.;
 
 impl PlicApp {
     pub(super) fn open_externally(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(path) = self.current().map(|entry| entry.file.path.clone()) else {
+        let Some(path) = self.viewed().map(|entry| entry.file.path.clone()) else {
             return;
         };
         // Leave the clip to the other player rather than playing both.
@@ -32,7 +32,7 @@ impl PlicApp {
     }
 
     pub(super) fn show_in_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(path) = self.current().map(|entry| entry.file.path.clone()) else {
+        let Some(path) = self.viewed().map(|entry| entry.file.path.clone()) else {
             return;
         };
         if let Err(error) = library::show_in_file_manager(&path) {
@@ -45,7 +45,7 @@ impl PlicApp {
 
     /// Asks before sending the selected clip to the recycle bin.
     pub(super) fn confirm_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(entry) = self.current() else {
+        let Some(entry) = self.viewed() else {
             return;
         };
         if entry.status == ClipStatus::Exporting {
@@ -82,7 +82,7 @@ impl PlicApp {
         cx: &mut Context<Self>,
     ) {
         // The viewer would keep the file open.
-        if self.current().is_some_and(|entry| entry.file.path == path) {
+        if self.viewed().is_some_and(|entry| entry.file.path == path) {
             self.player.update(cx, |player, cx| player.clear(cx));
         }
         let task = cx.background_spawn({
@@ -91,24 +91,54 @@ impl PlicApp {
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
-            this.update_in(cx, |this, window, cx| {
-                let index = this.index_of(&path);
-                match result {
-                    Ok(()) => {
-                        if let Some(index) = index {
-                            this.remove_clip(index, window, cx);
-                        }
+            this.update_in(cx, |this, window, cx| match result {
+                Ok(()) => this.forget(&path, window, cx),
+                Err(error) => {
+                    window.push_notification(
+                        Notification::error(format!("{error:#}"))
+                            .title("Could not delete the clip"),
+                        cx,
+                    );
+                    if this.viewed().is_some_and(|entry| entry.file.path == path) {
+                        this.show_selected_in_player(cx);
                     }
-                    Err(error) => {
-                        window.push_notification(
-                            Notification::error(format!("{error:#}"))
-                                .title("Could not delete the clip"),
-                            cx,
-                        );
-                        if index.is_some() && index == this.selected {
-                            this.show_selected_in_player(cx);
-                        }
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Moves the viewed settled original back among the clips to edit.
+    pub(super) fn restore_settled(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self
+            .settled_selected
+            .and_then(|index| self.settled.get(index))
+            .map(|entry| entry.file.path.clone())
+        else {
+            return;
+        };
+        // The viewer would keep the file open, and Windows will not move it.
+        self.player.update(cx, |player, cx| player.clear(cx));
+        let task = cx.background_spawn({
+            let path = path.clone();
+            async move { library::retry_while_busy(|| library::restore_original(&path)) }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            this.update_in(cx, |this, window, cx| match result {
+                Ok(restored) => {
+                    if let Some(index) = this.settled_index_of(&path) {
+                        this.unsettle(index, restored, window, cx);
                     }
+                }
+                Err(error) => {
+                    window.push_notification(
+                        Notification::error(format!("{error:#}"))
+                            .title("Could not restore the clip"),
+                        cx,
+                    );
+                    this.show_selected_in_player(cx);
                 }
             })
             .ok();
@@ -118,8 +148,9 @@ impl PlicApp {
 
     pub(super) fn render_clip_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let entry = self.current();
+        let entry = self.viewed();
         let enabled = entry.is_some();
+        let settled = self.is_viewing_settled();
         h_flex()
             .h(px(HEADER_HEIGHT))
             .flex_none()
@@ -147,11 +178,37 @@ impl PlicApp {
                         .child(details(entry)),
                 )
             })
+            .when(settled, |bar| {
+                bar.child(
+                    div()
+                        .flex_none()
+                        .px_1p5()
+                        .py_0p5()
+                        .rounded(theme.radius)
+                        .bg(theme.muted)
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child("Settled"),
+                )
+            })
             .child(div().flex_1())
             .child(
                 h_flex()
                     .flex_none()
                     .gap_1()
+                    .when(settled, |actions| {
+                        actions.child(
+                            Button::new("restore-clip")
+                                .ghost()
+                                .small()
+                                .icon(IconName::ArchiveRestore)
+                                .label("Restore")
+                                .tooltip("Move the original back to the clips to edit")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.restore_settled(window, cx)
+                                })),
+                        )
+                    })
                     .child(
                         Button::new("open-externally")
                             .ghost()

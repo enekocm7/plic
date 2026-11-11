@@ -220,7 +220,7 @@ impl PlicApp {
                 let title = format!("Exported {}", job.label);
                 let index = this.index_of(&source);
                 match archived {
-                    Ok(_) => {
+                    Ok(archived) => {
                         let folder = output.parent().map(library::display_name);
                         let message = folder.map_or_else(String::new, |folder| {
                             format!(
@@ -230,7 +230,8 @@ impl PlicApp {
                         });
                         window.push_notification(Notification::success(message).title(title), cx);
                         if let Some(index) = index {
-                            this.remove_clip(index, window, cx);
+                            let entry = this.take_clip(index, window, cx);
+                            this.settle(entry, archived);
                         }
                     }
                     Err(error) => {

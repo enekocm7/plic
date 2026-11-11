@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     thread,
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use anyhow::{Context, Result, bail};
@@ -21,6 +21,7 @@ const VIDEO_EXTENSIONS: [&str; 5] = ["mp4", "mov", "mkv", "webm", "m4v"];
 pub struct ClipFile {
     pub path: PathBuf,
     pub size: u64,
+    pub modified: Option<SystemTime>,
 }
 
 impl ClipFile {
@@ -40,6 +41,8 @@ impl ClipFile {
 #[derive(Debug, Clone)]
 pub struct Library {
     pub clips: Vec<ClipFile>,
+    /// Originals already exported and moved to [`EDITED_DIR`], newest first.
+    pub settled: Vec<ClipFile>,
     /// Subfolders that exports can be saved into, sorted by name.
     pub folders: Vec<PathBuf>,
 }
@@ -63,18 +66,40 @@ impl Library {
                 if entry.file_name() != EDITED_DIR && !hidden {
                     folders.push(path);
                 }
-            } else if metadata.is_file() && is_video(&path) && !is_partial_export(&path) {
-                clips.push(ClipFile {
-                    path,
-                    size: metadata.len(),
-                });
+            } else if let Some(clip) = ClipFile::from_entry(path, &metadata) {
+                clips.push(clip);
             }
         }
-
         clips.sort_by_cached_key(|clip| sort_key(&clip.path));
         folders.sort_by_cached_key(|path| sort_key(path));
 
-        Ok(Self { clips, folders })
+        // A missing or unreadable edited folder just means nothing is settled.
+        let mut settled: Vec<ClipFile> = fs::read_dir(root.join(EDITED_DIR))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| {
+                let metadata = entry.metadata().ok()?;
+                ClipFile::from_entry(entry.path(), &metadata)
+            })
+            .collect();
+        settled.sort_by_key(|clip| std::cmp::Reverse(clip.modified));
+
+        Ok(Self {
+            clips,
+            settled,
+            folders,
+        })
+    }
+}
+
+impl ClipFile {
+    fn from_entry(path: PathBuf, metadata: &fs::Metadata) -> Option<Self> {
+        (metadata.is_file() && is_video(&path) && !is_partial_export(&path)).then(|| Self {
+            path,
+            size: metadata.len(),
+            modified: metadata.modified().ok(),
+        })
     }
 }
 
@@ -113,6 +138,23 @@ pub fn archive_original(source: &Path) -> Result<PathBuf> {
         bail!("{} already exists", destination.display());
     }
     fs::rename(source, &destination)
+        .with_context(|| format!("could not move to {}", destination.display()))?;
+    Ok(destination)
+}
+
+/// Moves an archived original from [`EDITED_DIR`] back into the clips
+/// folder, undoing [`archive_original`].
+pub fn restore_original(archived: &Path) -> Result<PathBuf> {
+    let name = archived.file_name().context("clip has no file name")?;
+    let root = archived
+        .parent()
+        .and_then(Path::parent)
+        .context("clip is not inside a clips folder")?;
+    let destination = root.join(name);
+    if destination.exists() {
+        bail!("{} already exists", destination.display());
+    }
+    fs::rename(archived, &destination)
         .with_context(|| format!("could not move to {}", destination.display()))?;
     Ok(destination)
 }
@@ -228,6 +270,28 @@ pub fn display_name(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archives_and_restores_originals() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("plic-library-{}", std::process::id()));
+        fs::create_dir_all(&root)?;
+        let clip = root.join("clip.mp4");
+        fs::write(&clip, b"video")?;
+
+        let archived = archive_original(&clip)?;
+        assert_eq!(archived, root.join(EDITED_DIR).join("clip.mp4"));
+        let library = Library::scan(&root)?;
+        assert!(library.clips.is_empty());
+        assert_eq!(library.settled.len(), 1);
+
+        assert_eq!(restore_original(&archived)?, clip);
+        let library = Library::scan(&root)?;
+        assert_eq!(library.clips.len(), 1);
+        assert!(library.settled.is_empty());
+
+        fs::remove_dir_all(&root)?;
+        Ok(())
+    }
 
     #[test]
     fn accepts_ordinary_names() {

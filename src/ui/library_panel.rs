@@ -15,6 +15,15 @@ use crate::{library, timestamp};
 
 const PANEL_WIDTH: f32 = 280.;
 const ROW_HEIGHT: f32 = 64.;
+/// The open Settled list grows up to this many rows, then scrolls.
+const SETTLED_VISIBLE_ROWS: f32 = 4.5;
+
+/// Which of the two lists a row belongs to.
+#[derive(Clone, Copy)]
+enum List {
+    Clips,
+    Settled,
+}
 
 impl PlicApp {
     pub(super) fn render_library(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -64,6 +73,60 @@ impl PlicApp {
                         .child(Scrollbar::vertical(&self.list_scroll)),
                 )
             })
+            .when(!self.settled.is_empty(), |panel| {
+                panel.child(self.render_settled(cx))
+            })
+    }
+
+    /// The collapsible list of originals already exported, at the bottom.
+    fn render_settled(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let count = self.settled.len();
+        let open = self.settled_open;
+        let height = px(ROW_HEIGHT * (count as f32).min(SETTLED_VISIBLE_ROWS) + 4.);
+        v_flex()
+            .flex_none()
+            .border_t_1()
+            .border_color(theme.sidebar_border)
+            .child(
+                h_flex()
+                    .id("settled-toggle")
+                    .h(px(36.))
+                    .mx_2()
+                    .my_1()
+                    .px_2()
+                    .gap_2()
+                    .rounded(theme.radius)
+                    .cursor_pointer()
+                    .text_color(theme.muted_foreground)
+                    .hover(|row| row.bg(theme.list_hover).text_color(theme.foreground))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_settled(cx)))
+                    .child(Icon::new(IconName::Archive).small())
+                    .child(div().flex_1().text_sm().child("Settled"))
+                    .child(div().text_xs().child(count.to_string()))
+                    .child(
+                        Icon::new(if open {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .small(),
+                    ),
+            )
+            .when(open, |section| {
+                section.child(
+                    div()
+                        .relative()
+                        .h(height)
+                        .pb_1()
+                        .child(
+                            uniform_list("settled", count, cx.processor(Self::render_settled_rows))
+                                .size_full()
+                                .track_scroll(&self.settled_scroll),
+                        )
+                        .child(Scrollbar::vertical(&self.settled_scroll)),
+                )
+            })
     }
 
     /// Explains why the list is empty and offers a way forward.
@@ -80,6 +143,11 @@ impl PlicApp {
                 IconName::CircleAlert,
                 "Could not read this folder",
                 error.clone(),
+            ),
+            (Some(_), None) if !self.settled.is_empty() => (
+                IconName::CircleCheck,
+                "All caught up",
+                "Every clip here has been edited. New recordings will show up here.".into(),
             ),
             (Some(_), None) => (
                 IconName::Clapperboard,
@@ -125,13 +193,35 @@ impl PlicApp {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
+        self.render_rows(List::Clips, range, cx)
+    }
+
+    fn render_settled_rows(
+        &mut self,
+        range: Range<usize>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        self.render_rows(List::Settled, range, cx)
+    }
+
+    fn render_rows(
+        &self,
+        list: List,
+        range: Range<usize>,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let theme = cx.theme().clone();
+        let (entries, selected_index, id) = match list {
+            List::Clips => (&self.clips, self.selected, "clip"),
+            List::Settled => (&self.settled, self.settled_selected, "settled-clip"),
+        };
         range
             .filter_map(|index| {
-                let entry = self.clips.get(index)?;
-                let selected = self.selected == Some(index);
+                let entry = entries.get(index)?;
+                let selected = selected_index == Some(index);
                 let row = h_flex()
-                    .id(("clip", index))
+                    .id((id, index))
                     .size_full()
                     .px_2()
                     .gap_3()
@@ -139,9 +229,10 @@ impl PlicApp {
                     .cursor_pointer()
                     .when(selected, |row| row.bg(theme.sidebar_accent))
                     .when(!selected, |row| row.hover(|row| row.bg(theme.list_hover)))
-                    .on_click(
-                        cx.listener(move |this, _, window, cx| this.select(index, window, cx)),
-                    )
+                    .on_click(cx.listener(move |this, _, window, cx| match list {
+                        List::Clips => this.select(index, window, cx),
+                        List::Settled => this.select_settled(index, window, cx),
+                    }))
                     .child(render_thumbnail(entry, &theme))
                     .child(
                         v_flex()

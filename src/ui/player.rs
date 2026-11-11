@@ -112,6 +112,8 @@ pub struct Player {
     drag: Option<Drag>,
     error: Option<SharedString>,
     trim: TrimRange,
+    /// False for clips that are only viewed, such as exported originals.
+    trimmable: bool,
     looping: bool,
     filmstrip: Vec<Option<Arc<RenderImage>>>,
     filmstrip_workers: WorkerPool,
@@ -141,6 +143,7 @@ impl Player {
             drag: None,
             error: None,
             trim: TrimRange::default(),
+            trimmable: true,
             looping: false,
             filmstrip: Vec::new(),
             filmstrip_workers: WorkerPool::new("filmstrip", 2),
@@ -363,6 +366,14 @@ impl Player {
         }
     }
 
+    /// Shows or hides the trim handles and enables the trim shortcuts.
+    pub fn set_trimmable(&mut self, trimmable: bool, cx: &mut Context<Self>) {
+        if self.trimmable != trimmable {
+            self.trimmable = trimmable;
+            cx.notify();
+        }
+    }
+
     /// Replaces the trim range, e.g. after it was typed into the editor.
     pub fn set_trim(&mut self, trim: TrimRange, cx: &mut Context<Self>) {
         if self.trim != trim {
@@ -372,7 +383,7 @@ impl Player {
     }
 
     fn change_trim(&mut self, trim: TrimRange, cx: &mut Context<Self>) {
-        if self.trim != trim {
+        if self.trimmable && self.trim != trim {
             self.trim = trim;
             cx.emit(PlayerEvent::TrimChanged(trim));
             cx.notify();
@@ -479,7 +490,7 @@ impl Player {
         TimelineState {
             duration: self.duration(),
             position: self.position(),
-            trim: self.trim,
+            trim: self.trimmable.then_some(self.trim),
             filmstrip: self.filmstrip.clone(),
             drag: self.drag,
             aspect_ratio: self

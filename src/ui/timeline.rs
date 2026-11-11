@@ -36,7 +36,8 @@ pub enum Drag {
 pub struct TimelineState {
     pub duration: Option<Duration>,
     pub position: Duration,
-    pub trim: TrimRange,
+    /// `None` hides the trim handles, for clips that are only viewed.
+    pub trim: Option<TrimRange>,
     pub filmstrip: Vec<Option<Arc<RenderImage>>>,
     pub drag: Option<Drag>,
     pub aspect_ratio: f32,
@@ -134,15 +135,17 @@ pub fn render(state: TimelineState, cx: &mut Context<Player>) -> impl IntoElemen
                 origin: point(scale.left, bounds.origin.y + px(STRIP_TOP)),
                 size: size(scale.width, px(STRIP_HEIGHT)),
             };
-            let handles = Handles::new(&scale, state.trim);
+            let handles = state.trim.map(|trim| Handles::new(&scale, trim));
 
             paint_filmstrip(window, strip, &state, &colors);
-            paint_selection(window, strip, handles, &colors);
+            if let Some(handles) = handles {
+                paint_selection(window, strip, handles, &colors);
+            }
             paint_playhead(window, strip, scale.x(state.position), &colors);
 
             let hovered = hitbox
                 .is_hovered(window)
-                .then(|| handles.pick(window.mouse_position(), strip.origin.y));
+                .then(|| pick(handles, window.mouse_position(), strip.origin.y));
             let cursor = match state.drag.or(hovered) {
                 Some(Drag::TrimStart | Drag::TrimEnd) => CursorStyle::ResizeLeftRight,
                 _ => CursorStyle::PointingHand,
@@ -279,11 +282,15 @@ fn paint_playhead(window: &mut Window, strip: Bounds<Pixels>, x: Pixels, colors:
 
 /// Listening at window level keeps a drag alive when the pointer leaves the
 /// timeline.
+fn pick(handles: Option<Handles>, position: Point<Pixels>, strip_top: Pixels) -> Drag {
+    handles.map_or(Drag::Playhead, |handles| handles.pick(position, strip_top))
+}
+
 fn register_dragging(
     this: WeakEntity<Player>,
     hitbox: Hitbox,
     scale: Scale,
-    handles: Handles,
+    handles: Option<Handles>,
     strip_top: Pixels,
     window: &mut Window,
 ) {
@@ -296,7 +303,7 @@ fn register_dragging(
             {
                 return;
             }
-            let drag = handles.pick(event.position, strip_top);
+            let drag = pick(handles, event.position, strip_top);
             this.update(cx, |player, cx| {
                 player.begin_drag(drag, cx);
                 // Grabbing a handle should not make it jump to the pointer.
