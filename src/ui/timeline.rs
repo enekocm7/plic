@@ -21,8 +21,8 @@ const INSET: f32 = 16.;
 const RADIUS: f32 = 6.;
 const HANDLE_WIDTH: f32 = 10.;
 const FRAME_BORDER: f32 = 2.;
-/// How close the pointer must be to a handle to grab it.
-const HANDLE_REACH: f32 = 10.;
+/// Extra room around a handle tab that still grabs it.
+const GRAB_SLACK: f32 = 3.;
 
 /// What a timeline drag moves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,22 +87,27 @@ impl Handles {
         }
     }
 
-    /// Which handle, if any, a press at `x` grabs. Handles win over the
-    /// playhead so a trim point can always be picked up.
-    fn hit(&self, x: Pixels) -> Option<Drag> {
-        let distance = |handle: Pixels| f32::from((x - handle).abs());
-        let (to_start, to_end) = (distance(self.start), distance(self.end));
-        if to_start.min(to_end) > HANDLE_REACH {
-            return None;
+    /// What a press at `position` drags.
+    ///
+    /// The band above the strip, where the knob sits, always moves the
+    /// playhead. Inside the strip only the handle tabs, which stick out of
+    /// the kept range, pick up a trim point; everywhere else moves the
+    /// playhead, so it can be grabbed even when it sits on a trim point.
+    fn pick(&self, position: Point<Pixels>, strip_top: Pixels) -> Drag {
+        if position.y < strip_top {
+            return Drag::Playhead;
         }
-        // Inside a tiny range, grab the handle on the side being pressed.
-        Some(
-            if to_start < to_end || (to_start == to_end && x < self.start) {
-                Drag::TrimStart
-            } else {
-                Drag::TrimEnd
-            },
-        )
+        let x = position.x;
+        let reach = px(HANDLE_WIDTH + GRAB_SLACK);
+        let on_start = x <= self.start && x >= self.start - reach;
+        let on_end = x >= self.end && x <= self.end + reach;
+        match (on_start, on_end) {
+            // In a range narrower than the tabs, take the nearer one.
+            (true, true) if x - self.start > self.end - x => Drag::TrimEnd,
+            (true, _) => Drag::TrimStart,
+            (false, true) => Drag::TrimEnd,
+            (false, false) => Drag::Playhead,
+        }
     }
 }
 
@@ -135,16 +140,15 @@ pub fn render(state: TimelineState, cx: &mut Context<Player>) -> impl IntoElemen
             paint_selection(window, strip, handles, &colors);
             paint_playhead(window, strip, scale.x(state.position), &colors);
 
-            let hovered_handle = hitbox
+            let hovered = hitbox
                 .is_hovered(window)
-                .then(|| handles.hit(window.mouse_position().x))
-                .flatten();
-            let cursor = match state.drag.or(hovered_handle) {
+                .then(|| handles.pick(window.mouse_position(), strip.origin.y));
+            let cursor = match state.drag.or(hovered) {
                 Some(Drag::TrimStart | Drag::TrimEnd) => CursorStyle::ResizeLeftRight,
                 _ => CursorStyle::PointingHand,
             };
             window.set_cursor_style(cursor, &hitbox);
-            register_dragging(this.clone(), hitbox, scale, handles, window);
+            register_dragging(this.clone(), hitbox, scale, handles, strip.origin.y, window);
         },
     )
     .w_full()
@@ -280,6 +284,7 @@ fn register_dragging(
     hitbox: Hitbox,
     scale: Scale,
     handles: Handles,
+    strip_top: Pixels,
     window: &mut Window,
 ) {
     window.on_mouse_event({
@@ -291,7 +296,7 @@ fn register_dragging(
             {
                 return;
             }
-            let drag = handles.hit(event.position.x).unwrap_or(Drag::Playhead);
+            let drag = handles.pick(event.position, strip_top);
             this.update(cx, |player, cx| {
                 player.begin_drag(drag, cx);
                 // Grabbing a handle should not make it jump to the pointer.
@@ -331,7 +336,7 @@ mod tests {
 
     use gpui_kit::{Bounds, point, px, size};
 
-    use super::{Drag, HEIGHT, Handles, INSET, Scale};
+    use super::{Drag, HEIGHT, Handles, INSET, STRIP_TOP, Scale};
     use crate::trim::TrimRange;
 
     fn scale() -> Scale {
@@ -353,13 +358,20 @@ mod tests {
     }
 
     #[test]
-    fn grabs_the_nearest_handle_within_reach() {
+    fn handle_tabs_grab_trim_points_and_the_rest_moves_the_playhead() {
         let handles = Handles::new(
             &scale(),
             TrimRange::new(Duration::from_secs(10), Some(Duration::from_secs(60))),
         );
-        assert_eq!(handles.hit(px(INSET + 104.)), Some(Drag::TrimStart));
-        assert_eq!(handles.hit(px(INSET + 596.)), Some(Drag::TrimEnd));
-        assert_eq!(handles.hit(px(INSET + 300.)), None);
+        let strip_top = px(STRIP_TOP);
+        let at = |x: f32, y: f32| point(px(INSET + x), px(y));
+        let in_strip = STRIP_TOP + 10.;
+        // The tabs sit just outside the kept range.
+        assert_eq!(handles.pick(at(95., in_strip), strip_top), Drag::TrimStart);
+        assert_eq!(handles.pick(at(605., in_strip), strip_top), Drag::TrimEnd);
+        // Just inside the range, or above the strip, is the playhead.
+        assert_eq!(handles.pick(at(102., in_strip), strip_top), Drag::Playhead);
+        assert_eq!(handles.pick(at(98., 4.), strip_top), Drag::Playhead);
+        assert_eq!(handles.pick(at(300., in_strip), strip_top), Drag::Playhead);
     }
 }
