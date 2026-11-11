@@ -258,7 +258,16 @@ struct TempFile<'a>(&'a Path);
 
 impl Drop for TempFile<'_> {
     fn drop(&mut self) {
-        let _ = fs::remove_file(self.0);
+        // A killed ffmpeg can hold the file for a moment longer, especially
+        // behind a launcher shim, and Windows will not delete an open file.
+        for _ in 0..20 {
+            match fs::remove_file(self.0) {
+                Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                    thread::sleep(Duration::from_millis(100));
+                }
+                _ => return,
+            }
+        }
     }
 }
 
