@@ -472,130 +472,143 @@ impl PlicApp {
                         .child("EXPORT"),
                 ),
             )
-            .child(
-                v_flex()
-                    .px_4()
-                    .gap_4()
-                    .child(
-                        v_flex().gap_1p5().child(label("File name")).child(
-                            Input::new(&self.editor.name)
-                                .small()
-                                .disabled(!enabled)
-                                .suffix(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground)
-                                        .child(".mp4"),
-                                ),
-                        ),
-                    )
-                    .child(
-                        v_flex()
-                            .gap_1p5()
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .child(v_flex().flex_1().gap_1p5().child(label("Start")).child(
-                                        time_field(
-                                            "start-from-playhead",
-                                            TimeField::Start,
-                                            &self.editor.start,
-                                            "Start at the playhead (I)",
-                                            cx,
-                                        ),
-                                    ))
-                                    .child(v_flex().flex_1().gap_1p5().child(label("End")).child(
-                                        time_field(
-                                            "end-from-playhead",
-                                            TimeField::End,
-                                            &self.editor.end,
-                                            "End at the playhead (O)",
-                                            cx,
-                                        ),
-                                    )),
-                            )
-                            .when_some(self.editor.time_error.clone(), |column, error| {
-                                column.child(div().text_xs().text_color(theme.danger).child(error))
-                            }),
-                    )
-                    .child(summary)
-                    .child(
-                        v_flex()
-                            .gap_1p5()
-                            .child(label("Save to"))
-                            .child(
-                                h_flex()
-                                    .gap_1()
-                                    .child(
-                                        div().flex_1().min_w_0().child(
-                                            Select::new(&self.editor.folder)
-                                                .small()
-                                                .icon(IconName::Folder)
-                                                .placeholder(if has_folders {
-                                                    "Choose a folder"
-                                                } else {
-                                                    "No subfolders yet"
-                                                })
-                                                .disabled(!enabled || !has_folders),
-                                        ),
-                                    )
-                                    .child(
-                                        Button::new("new-folder")
-                                            .ghost()
-                                            .small()
-                                            .icon(IconName::FolderPlus)
-                                            .tooltip("New destination folder")
-                                            .disabled(self.folder.is_none())
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.prompt_new_folder(window, cx)
-                                            })),
+            .when(entry.is_some(), |panel| {
+                panel.child(
+                    v_flex()
+                        .px_4()
+                        .gap_4()
+                        .child(
+                            v_flex().gap_1p5().child(label("File name")).child(
+                                Input::new(&self.editor.name)
+                                    .small()
+                                    .disabled(!enabled)
+                                    .suffix(
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(".mp4"),
                                     ),
-                            )
-                            .when_some(output_preview, |column, preview| {
-                                column.child(
-                                    div()
+                            ),
+                        )
+                        .child(
+                            v_flex()
+                                .gap_1p5()
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .child(
+                                            v_flex()
+                                                .flex_1()
+                                                .gap_1p5()
+                                                .child(label("Start"))
+                                                .child(time_field(
+                                                    "start-from-playhead",
+                                                    TimeField::Start,
+                                                    &self.editor.start,
+                                                    "Start at the playhead (I)",
+                                                    cx,
+                                                )),
+                                        )
+                                        .child(
+                                            v_flex().flex_1().gap_1p5().child(label("End")).child(
+                                                time_field(
+                                                    "end-from-playhead",
+                                                    TimeField::End,
+                                                    &self.editor.end,
+                                                    "End at the playhead (O)",
+                                                    cx,
+                                                ),
+                                            ),
+                                        ),
+                                )
+                                .when_some(self.editor.time_error.clone(), |column, error| {
+                                    column.child(
+                                        div().text_xs().text_color(theme.danger).child(error),
+                                    )
+                                }),
+                        )
+                        .child(summary)
+                        .child(
+                            v_flex()
+                                .gap_1p5()
+                                .child(label("Save to"))
+                                .child(
+                                    h_flex()
+                                        .gap_1()
+                                        .child(
+                                            div().flex_1().min_w_0().child(
+                                                Select::new(&self.editor.folder)
+                                                    .small()
+                                                    .icon(IconName::Folder)
+                                                    .placeholder(if has_folders {
+                                                        "Choose a folder"
+                                                    } else {
+                                                        "No subfolders yet"
+                                                    })
+                                                    .disabled(!enabled || !has_folders),
+                                            ),
+                                        )
+                                        .child(
+                                            Button::new("new-folder")
+                                                .ghost()
+                                                .small()
+                                                .icon(IconName::FolderPlus)
+                                                .tooltip("New destination folder")
+                                                .disabled(self.folder.is_none())
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.prompt_new_folder(window, cx)
+                                                })),
+                                        ),
+                                )
+                                .when_some(output_preview, |column, preview| {
+                                    column.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .truncate()
+                                            .child(preview),
+                                    )
+                                }),
+                        )
+                        .child(
+                            v_flex()
+                                .gap_2()
+                                .child(
+                                    Button::new("export")
+                                        .primary()
+                                        .w_full()
+                                        .icon(IconName::Scissors)
+                                        .label(if exporting {
+                                            "Exporting…"
+                                        } else {
+                                            "Export clip"
+                                        })
+                                        .loading(exporting)
+                                        .disabled(!enabled || exporting)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.export_current(window, cx)
+                                        })),
+                                )
+                                .child(
+                                    h_flex()
+                                        .justify_center()
+                                        .gap_1()
                                         .text_xs()
                                         .text_color(theme.muted_foreground)
-                                        .truncate()
-                                        .child(preview),
+                                        .child("or press")
+                                        .child(Kbd::new(
+                                            Keystroke::parse("ctrl-enter")
+                                                .expect("valid keystroke"),
+                                        )),
                                 )
-                            }),
-                    )
-                    .child(
-                        v_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("export")
-                                    .primary()
-                                    .w_full()
-                                    .icon(IconName::Scissors)
-                                    .label(if exporting {
-                                        "Exporting…"
-                                    } else {
-                                        "Export clip"
-                                    })
-                                    .loading(exporting)
-                                    .disabled(!enabled || exporting)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.export_current(window, cx)
-                                    })),
-                            )
-                            .child(
-                                h_flex()
-                                    .justify_center()
-                                    .gap_1()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child("or press")
-                                    .child(Kbd::new(
-                                        Keystroke::parse("ctrl-enter").expect("valid keystroke"),
-                                    )),
-                            )
-                            .when_some(self.editor.export_error.clone(), |column, error| {
-                                column.child(div().text_xs().text_color(theme.danger).child(error))
-                            }),
-                    ),
-            )
+                                .when_some(self.editor.export_error.clone(), |column, error| {
+                                    column.child(
+                                        div().text_xs().text_color(theme.danger).child(error),
+                                    )
+                                }),
+                        ),
+                )
+            })
             .child(div().flex_1())
             .child(self.render_queue(cx))
     }

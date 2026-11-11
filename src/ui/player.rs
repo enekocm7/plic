@@ -860,14 +860,17 @@ impl Render for Player {
             .size_full()
             .bg(background)
             .child(self.render_stage(cx))
-            .child(
-                v_flex()
-                    .flex_none()
-                    .border_t_1()
-                    .border_color(border)
-                    .child(timeline::render(self.timeline_state(), cx))
-                    .child(self.render_transport(cx)),
-            )
+            // Controls only make sense with something to control.
+            .when(self.source.is_some(), |player| {
+                player.child(
+                    v_flex()
+                        .flex_none()
+                        .border_t_1()
+                        .border_color(border)
+                        .child(timeline::render(self.timeline_state(), cx))
+                        .child(self.render_transport(cx)),
+                )
+            })
     }
 }
 

@@ -587,10 +587,15 @@ impl Render for PlicApp {
                                 MouseButton::Left,
                                 cx.listener(|this, _, window, cx| this.focus.focus(window, cx)),
                             )
-                            .child(self.render_clip_header(cx))
+                            .when(self.current().is_some(), |column| {
+                                column.child(self.render_clip_header(cx))
+                            })
                             .child(div().flex_1().min_h_0().child(self.player.clone())),
                     )
-                    .child(self.render_export_panel(cx)),
+                    // Kept while exports run, so their progress stays visible.
+                    .when(self.current().is_some() || !self.jobs.is_empty(), |row| {
+                        row.child(self.render_export_panel(cx))
+                    }),
             )
     }
 }
