@@ -130,72 +130,263 @@ pub fn export(
     if request.transform.crop.is_some() && request.video_size.is_none() {
         return Err(anyhow::anyhow!("the video size is unknown, so it cannot be cropped").into());
     }
-    let video_filter = request.transform.filter(request.video_size);
     let ranges = effective_ranges(request)?;
+    let expected = ranges
+        .iter()
+        .map(|range| range.length(request.source_duration))
+        .sum::<Option<Duration>>();
     let temporary = create_temp_path(output, "mp4")?;
     // Removes the temporary file on every early return below.
     let guard = TempFile(&temporary);
 
-    let mut command = Command::new("ffmpeg");
-    command.args(["-hide_banner", "-loglevel", "error", "-nostats", "-y"]);
     let audio_filter = request.audio_adjust.filter();
     let audio = AudioPlan {
         tracks: &request.audio_tracks,
         chain: audio_filter.as_deref(),
     };
-    // Kept alive until ffmpeg is done with it.
-    let mut _concat_list = None;
+    let video_filter = request.transform.filter(request.video_size);
+    let parts = Parts {
+        request,
+        ranges: &ranges,
+        audio,
+        video_filter: video_filter.as_deref(),
+    };
+
     match request.mode {
         ExportMode::Reencode => {
-            // One seeked input per range, joined by the concat filter: every
-            // cut stays frame-accurate and the joins are seamless.
-            for range in &ranges {
-                add_input(&mut command, request, *range);
-            }
-            command
-                .arg("-filter_complex")
-                .arg(graph::reencode(
-                    ranges.len(),
-                    video_filter.as_deref(),
-                    audio,
-                ))
-                .args(["-map", "[v]"])
-                .args(encoder::video_args(request.video));
-            if !audio.is_silent() {
-                command.args(["-map", "[a]", "-c:a", "aac", "-b:a", "192k"]);
+            let rates = match request.video.target_size {
+                Some(target) => {
+                    let length = expected.context(
+                        "the length of the export is unknown, so it cannot aim for a size",
+                    )?;
+                    Some(target_bitrates(target, length, !audio.is_silent())?)
+                }
+                None => None,
+            };
+            let plan = encoder::plan(request.video, rates.map(|rates| rates.video));
+            let audio_bitrate = rates.map_or(DEFAULT_AUDIO_BITRATE, |rates| rates.audio);
+            if plan.two_pass {
+                // The first pass only gathers statistics for the second.
+                let log = create_temp_path(output, "log")?;
+                let _log = PassLog(log.clone());
+                let first = parts.reencode(
+                    &plan.args,
+                    &["-pass", "1", "-passlogfile"],
+                    Some(&log),
+                    audio_bitrate,
+                );
+                run(first, NULL_OUTPUT, cancel, expected, |fraction| {
+                    on_progress(fraction * 0.5)
+                })?;
+                let second = parts.reencode(
+                    &plan.args,
+                    &["-pass", "2", "-passlogfile"],
+                    Some(&log),
+                    audio_bitrate,
+                );
+                run(
+                    second,
+                    Output::File(&temporary),
+                    cancel,
+                    expected,
+                    |fraction| on_progress(0.5 + fraction * 0.5),
+                )?;
+            } else {
+                let command = parts.reencode(&plan.args, &[], None, audio_bitrate);
+                run(
+                    command,
+                    Output::File(&temporary),
+                    cancel,
+                    expected,
+                    &mut on_progress,
+                )?;
             }
         }
         ExportMode::StreamCopy => {
-            if let [range] = ranges.as_slice() {
-                add_input(&mut command, request, *range);
-            } else {
+            // Kept alive until ffmpeg is done with it.
+            let mut _concat_list = None;
+            let list = if ranges.len() > 1 {
                 let list = create_temp_path(output, "txt")?;
                 fs::write(&list, concat_list(&request.source, &ranges))
                     .with_context(|| format!("could not write {}", list.display()))?;
-                command
-                    .args(["-f", "concat", "-safe", "0", "-i"])
-                    .arg(&list);
-                _concat_list = Some(OwnedTempFile(list));
+                _concat_list = Some(OwnedTempFile(list.clone()));
+                Some(list)
+            } else {
+                None
+            };
+            let command = parts.stream_copy(list.as_deref());
+            run(
+                command,
+                Output::File(&temporary),
+                cancel,
+                expected,
+                &mut on_progress,
+            )?;
+        }
+    }
+
+    on_progress(1.0);
+    publish(&temporary, output)?;
+    // The published file is a hard link or a copy; the temporary goes either way.
+    drop(guard);
+    Ok(output.clone())
+}
+
+/// Audio bitrate of re-encoded sound when no target size squeezes it.
+const DEFAULT_AUDIO_BITRATE: u64 = 192_000;
+
+/// The share of a target size left for the streams; the rest covers the
+/// container and the encoder overshooting a little.
+const TARGET_HEADROOM: f64 = 0.95;
+
+/// The lowest video bitrate worth encoding at.
+const MIN_VIDEO_BITRATE: u64 = 100_000;
+
+/// Bitrates, in bits per second, that make an export land on a size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TargetRates {
+    pub video: u64,
+    pub audio: u64,
+}
+
+/// Splits `target_bytes` over `length` between video and audio.
+pub fn target_bitrates(
+    target_bytes: u64,
+    length: Duration,
+    with_audio: bool,
+) -> Result<TargetRates> {
+    let headroom = TARGET_HEADROOM;
+    let seconds = length.as_secs_f64().max(0.1);
+    let total = (target_bytes as f64 * 8.0 * headroom / seconds) as u64;
+    // Sound gets up to 128 kbps, but never more than a sixth of the budget.
+    let audio = if with_audio {
+        (total / 6).clamp(32_000, 128_000)
+    } else {
+        0
+    };
+    let video = total.saturating_sub(audio);
+    if video < MIN_VIDEO_BITRATE {
+        let needed = (MIN_VIDEO_BITRATE + audio) as f64 * seconds / 8.0 / headroom;
+        bail!(
+            "{:.1} MB is too small for {:.0} seconds; it needs at least {:.1} MB",
+            target_bytes as f64 / MB,
+            seconds,
+            needed / MB
+        );
+    }
+    Ok(TargetRates { video, audio })
+}
+
+const MB: f64 = 1024.0 * 1024.0;
+
+/// Where ffmpeg writes.
+#[derive(Clone, Copy)]
+enum Output<'a> {
+    File(&'a Path),
+    /// Discarded, for a first pass.
+    Null,
+}
+
+const NULL_OUTPUT: Output<'static> = Output::Null;
+
+/// What every ffmpeg command of one export shares.
+struct Parts<'a> {
+    request: &'a ExportRequest,
+    ranges: &'a [TrimRange],
+    audio: AudioPlan<'a>,
+    video_filter: Option<&'a str>,
+}
+
+impl Parts<'_> {
+    /// A re-encode: one seeked input per range, joined by the concat
+    /// filter, so every cut stays frame-accurate and the joins seamless.
+    /// `pass_args` and `pass_log` add two-pass flags.
+    fn reencode(
+        &self,
+        video_args: &[String],
+        pass_args: &[&str],
+        pass_log: Option<&Path>,
+        audio_bitrate: u64,
+    ) -> Command {
+        let mut command = base_command();
+        for range in self.ranges {
+            add_input(&mut command, self.request, *range);
+        }
+        command
+            .arg("-filter_complex")
+            .arg(graph::reencode(
+                self.ranges.len(),
+                self.video_filter,
+                self.audio,
+            ))
+            .args(["-map", "[v]"])
+            .args(video_args)
+            .args(pass_args);
+        if let Some(log) = pass_log {
+            command.arg(log);
+        }
+        if !self.audio.is_silent() {
+            command
+                .args(["-map", "[a]", "-c:a", "aac", "-b:a"])
+                .arg(audio_bitrate.to_string());
+        }
+        command
+    }
+
+    /// A stream copy of one range, or of several through the concat
+    /// demuxer script at `list`.
+    fn stream_copy(&self, list: Option<&Path>) -> Command {
+        let mut command = base_command();
+        match (list, self.ranges) {
+            (Some(list), _) => {
+                command.args(["-f", "concat", "-safe", "0", "-i"]).arg(list);
             }
-            command.args(["-map", "0:v:0", "-c:v", "copy"]);
-            if let Some(audio_graph) = graph::copy_audio(audio) {
-                // Mixed or adjusted sound has to be encoded again.
-                command
-                    .arg("-filter_complex")
-                    .arg(audio_graph)
-                    .args(["-map", "[a]", "-c:a", "aac", "-b:a", "192k"]);
-            } else if let [track] = audio.tracks {
-                command
-                    .arg("-map")
-                    .arg(format!("0:a:{track}"))
-                    .args(["-c:a", "copy"]);
-            }
+            (None, [range, ..]) => add_input(&mut command, self.request, *range),
+            (None, []) => {}
+        }
+        command.args(["-map", "0:v:0", "-c:v", "copy"]);
+        if let Some(audio_graph) = graph::copy_audio(self.audio) {
+            // Mixed or adjusted sound has to be encoded again.
+            command
+                .arg("-filter_complex")
+                .arg(audio_graph)
+                .args(["-map", "[a]", "-c:a", "aac", "-b:a"])
+                .arg(DEFAULT_AUDIO_BITRATE.to_string());
+        } else if let [track] = self.audio.tracks {
+            command
+                .arg("-map")
+                .arg(format!("0:a:{track}"))
+                .args(["-c:a", "copy"]);
+        }
+        command
+    }
+}
+
+fn base_command() -> Command {
+    let mut command = Command::new("ffmpeg");
+    command.args(["-hide_banner", "-loglevel", "error", "-nostats", "-y"]);
+    command
+}
+
+/// Runs one ffmpeg command to completion, reporting its progress through
+/// `expected` as a fraction.
+fn run(
+    mut command: Command,
+    output: Output,
+    cancel: &CancelToken,
+    expected: Option<Duration>,
+    mut on_progress: impl FnMut(f32),
+) -> Result<(), ExportError> {
+    match output {
+        Output::File(path) => {
+            command.args(["-movflags", "+faststart"]);
+            command.args(["-progress", "pipe:1"]).arg(path);
+        }
+        Output::Null => {
+            command.args(["-progress", "pipe:1", "-f", "null", "-"]);
         }
     }
     command
-        .args(["-movflags", "+faststart"])
-        .args(["-progress", "pipe:1"])
-        .arg(&temporary)
         .no_window()
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -206,10 +397,6 @@ pub fn export(
         .context("could not start ffmpeg; check that it is installed and on PATH")?;
     let stderr = drain_in_background(child.stderr.take());
 
-    let expected = ranges
-        .iter()
-        .map(|range| range.length(request.source_duration))
-        .sum::<Option<Duration>>();
     if let Some(stdout) = child.stdout.take() {
         for line in BufReader::new(stdout).lines() {
             if cancel.is_cancelled() {
@@ -236,12 +423,29 @@ pub fn export(
         }
         return Err(anyhow::anyhow!("ffmpeg exited with status {status}: {stderr}").into());
     }
+    Ok(())
+}
 
-    on_progress(1.0);
-    publish(&temporary, output)?;
-    // The published file is a hard link or a copy; the temporary goes either way.
-    drop(guard);
-    Ok(output.clone())
+/// The statistics files of a two-pass encode, named after a reserved
+/// temporary path, removed when dropped.
+struct PassLog(PathBuf);
+
+impl Drop for PassLog {
+    fn drop(&mut self) {
+        let base = self.0.to_string_lossy().into_owned();
+        for suffix in [
+            "",
+            "-0.log",
+            "-0.log.mbtree",
+            "-0.log.cutree",
+            "-0.log.temp",
+        ] {
+            let path = PathBuf::from(format!("{base}{suffix}"));
+            if path.exists() {
+                remove_temporary(&path);
+            }
+        }
+    }
 }
 
 /// The ranges that will actually be written. A stream copy can only start
@@ -456,6 +660,87 @@ mod tests {
              file 'C:/clips/it'\\''s.mp4'\noutpoint 5.000\n\
              file 'C:/clips/it'\\''s.mp4'\ninpoint 10.000\n"
         );
+    }
+
+    #[test]
+    fn splits_a_target_size_between_video_and_audio() {
+        let mb = 1024 * 1024;
+        let minute = Duration::from_secs(60);
+        let rates = target_bitrates(25 * mb, minute, true).unwrap();
+        // 25 MB over a minute is about 3.3 Mbps of streams after headroom.
+        assert_eq!(rates.audio, 128_000);
+        assert_eq!(rates.video + rates.audio, 3_320_490);
+        let silent = target_bitrates(25 * mb, minute, false).unwrap();
+        assert_eq!(silent.audio, 0);
+        assert_eq!(silent.video, 3_320_490);
+        // A tiny budget for a long clip is refused with the size it needs.
+        let error = target_bitrates(mb, Duration::from_secs(600), true)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("needs at least"), "{error}");
+    }
+
+    /// Needs ffmpeg on PATH: `cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    fn lands_under_a_target_size() {
+        let dir = std::env::temp_dir().join(format!("plic-target-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.mp4");
+        let made = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+            ])
+            .arg("testsrc2=s=1280x720:r=30:d=12")
+            .args([
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=d=12",
+                "-c:v",
+                "libx264",
+                "-crf",
+                "10",
+            ])
+            .args(["-c:a", "aac", "-shortest"])
+            .arg(&source)
+            .status()
+            .unwrap();
+        assert!(made.success());
+
+        let target = 1024 * 1024;
+        let request = ExportRequest {
+            source: source.clone(),
+            output: dir.join("out.mp4"),
+            ranges: vec![TrimRange::new(
+                Duration::from_secs(1),
+                Some(Duration::from_secs(11)),
+            )],
+            mode: ExportMode::Reencode,
+            video: VideoEncoding {
+                target_size: Some(target),
+                ..VideoEncoding::default()
+            },
+            source_duration: Some(Duration::from_secs(12)),
+            audio_tracks: vec![0],
+            audio_adjust: AudioAdjust::default(),
+            video_size: Some(FrameSize::new(1280, 720)),
+            transform: Transform::default(),
+        };
+        let output = export(&request, &CancelToken::default(), |_| {}).unwrap();
+        let size = fs::metadata(&output).unwrap().len();
+        let leftovers = fs::read_dir(&dir).unwrap().count();
+        fs::remove_dir_all(&dir).ok();
+        assert!(size <= target, "{size} bytes is over the target");
+        assert!(size > target / 2, "{size} bytes is far under the target");
+        // Only the source and the export remain: no pass logs or temporaries.
+        assert_eq!(leftovers, 2);
     }
 
     #[test]

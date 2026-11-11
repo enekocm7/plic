@@ -13,7 +13,9 @@ mod transform;
 use std::{process::Command, time::Duration};
 
 pub use encoder::{Codec, Quality, VideoEncoding, warm_up as warm_up_encoder};
-pub use export::{CancelToken, ExportError, ExportMode, ExportRequest, estimated_size, export};
+pub use export::{
+    CancelToken, ExportError, ExportMode, ExportRequest, estimated_size, export, target_bitrates,
+};
 pub use frames::{FrameSize, RawFrame, VideoStream, extract_frame, extract_keyframe};
 pub use graph::{AudioAdjust, TARGET_LOUDNESS};
 pub use probe::{MediaInfo, keyframe_at_or_before, probe};

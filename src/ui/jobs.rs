@@ -91,6 +91,13 @@ impl PlicApp {
         let name = self.editor.name(cx);
         library::validate_file_stem(&name).map_err(|error| error.to_string())?;
         entry.segments.validate(info.duration)?;
+        if let Some(target) = self.editor.video.target_size
+            && self.editor.mode == ffmpeg::ExportMode::Reencode
+            && let Some(length) = entry.segments.total_length(info.duration)
+        {
+            ffmpeg::target_bitrates(target, length, !entry.export_tracks().is_empty())
+                .map_err(|error| format!("{error:#}"))?;
+        }
         let folder = self
             .destination(entry)
             .ok_or("Create a destination folder first")?;
