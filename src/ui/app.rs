@@ -479,7 +479,12 @@ impl PlicApp {
                 )
                 .child(
                     h_flex()
+                        .id("title-actions")
                         .gap_1()
+                        // The whole title bar is a drag area for the OS; without
+                        // this, Windows treats clicks on these buttons as the
+                        // start of a window move and they never fire.
+                        .occlude()
                         .child(
                             Button::new("open-folder")
                                 .ghost()
