@@ -38,6 +38,10 @@ joined in order into one file, or, with **Join into one file** off, saved
 as `name-1`, `name-2`, … or under a name given to each part The original is only moved to `edited/` once every
 part has exported.
 
+Under **Frame**, crop the export to 16:9, 9:16, 1:1 or 4:5 (the viewer
+shows what is kept, and a slider moves the crop), rotate it in quarter
+turns, or flip it. These always re-encode.
+
 Turn on **Lossless** in the export panel to copy the video instead of
 re-encoding it: the export is near-instant and keeps the original quality,
 but the cut starts on the keyframe at or before the chosen start. The panel

@@ -27,7 +27,7 @@ use super::{
     shortcuts,
 };
 use crate::{
-    ffmpeg::{self, FrameSize, MediaInfo, RawFrame},
+    ffmpeg::{self, FrameSize, MediaInfo, RawFrame, Transform},
     library::{self, ClipFile, Library},
     trim::{Segments, TrimRange},
     worker::WorkerPool,
@@ -63,6 +63,8 @@ pub struct ClipEntry {
     pub thumbnail: Option<Arc<RenderImage>>,
     pub name: String,
     pub segments: Segments,
+    /// Crop, rotation and flips applied to the export.
+    pub transform: Transform,
     /// Destination chosen for this clip, if it differs from the default.
     pub folder: Option<PathBuf>,
     pub status: ClipStatus,
@@ -81,6 +83,7 @@ impl ClipEntry {
             details: Details::Loading,
             thumbnail: None,
             segments: Segments::default(),
+            transform: Transform::identity(),
             folder: None,
             status: ClipStatus::Pending,
         }
@@ -377,6 +380,7 @@ impl PlicApp {
         entry.file.path = archived;
         entry.status = ClipStatus::Pending;
         entry.segments = Segments::default();
+        entry.transform = Transform::identity();
         self.settled.insert(0, entry);
         if let Some(selected) = &mut self.settled_selected {
             *selected += 1;
@@ -416,8 +420,16 @@ impl PlicApp {
         };
         let path = entry.file.path.clone();
         let trimmable = !self.is_viewing_settled();
-        self.player
-            .update(cx, |player, cx| player.set_trimmable(trimmable, cx));
+        let crop = trimmable
+            .then(|| {
+                let size = entry.info()?.video_size?;
+                entry.transform.crop_rect(size)
+            })
+            .flatten();
+        self.player.update(cx, |player, cx| {
+            player.set_trimmable(trimmable, cx);
+            player.set_crop(crop, cx);
+        });
         match &entry.details {
             Details::Ready(info) => {
                 let (info, segments) = (info.clone(), entry.segments.clone());

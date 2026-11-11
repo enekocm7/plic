@@ -23,7 +23,7 @@ use super::{
 };
 use crate::{
     audio::AudioOutput,
-    ffmpeg::{self, FrameSize, MediaInfo},
+    ffmpeg::{self, CropRect, FrameSize, MediaInfo},
     playback::{MAX_FRAME_RATE, Playback},
     timestamp,
     trim::{self, Segments, TrimRange},
@@ -115,6 +115,8 @@ pub struct Player {
     /// False for clips that are only viewed, such as exported originals.
     trimmable: bool,
     looping: bool,
+    /// The part of the frame an export keeps, drawn over the video.
+    crop: Option<CropRect>,
     filmstrip: Vec<Option<Arc<RenderImage>>>,
     filmstrip_workers: WorkerPool,
     audio: AudioDevice,
@@ -145,6 +147,7 @@ impl Player {
             segments: Segments::default(),
             trimmable: true,
             looping: false,
+            crop: None,
             filmstrip: Vec::new(),
             filmstrip_workers: WorkerPool::new("filmstrip", 2),
             audio: AudioDevice::Unopened,
@@ -371,6 +374,14 @@ impl Player {
     pub fn set_trimmable(&mut self, trimmable: bool, cx: &mut Context<Self>) {
         if self.trimmable != trimmable {
             self.trimmable = trimmable;
+            cx.notify();
+        }
+    }
+
+    /// Shows which part of the frame an export keeps.
+    pub fn set_crop(&mut self, crop: Option<CropRect>, cx: &mut Context<Self>) {
+        if self.crop != crop {
+            self.crop = crop;
             cx.notify();
         }
     }
@@ -755,6 +766,8 @@ impl Player {
             .map(FrameSize::aspect_ratio);
         let viewport = self.viewport.clone();
         let this = cx.entity().downgrade();
+        let crop = self.crop;
+        let (shade, crop_border) = (black().opacity(0.6), theme.yellow);
 
         let overlay = match (&self.error, &self.source) {
             (Some(error), _) => Some((IconName::CircleAlert, error.clone())),
@@ -791,6 +804,9 @@ impl Player {
                             window
                                 .paint_image(target, target, Corners::default(), frame, 0, false)
                                 .ok();
+                            if let Some(crop) = crop {
+                                paint_crop(window, target, crop, shade, crop_border);
+                            }
                         }
                     },
                 )
@@ -944,6 +960,43 @@ impl Render for Player {
                 )
             })
     }
+}
+
+/// Shades what an export crops away and outlines what it keeps.
+fn paint_crop(
+    window: &mut Window,
+    frame: Bounds<Pixels>,
+    crop: CropRect,
+    shade: Hsla,
+    border: Hsla,
+) {
+    let kept = Bounds {
+        origin: point(
+            frame.origin.x + frame.size.width * crop.x,
+            frame.origin.y + frame.size.height * crop.y,
+        ),
+        size: size(
+            frame.size.width * crop.width,
+            frame.size.height * crop.height,
+        ),
+    };
+    let (left, top) = (frame.origin.x, frame.origin.y);
+    let (right, bottom) = (left + frame.size.width, top + frame.size.height);
+    let (kept_right, kept_bottom) = (
+        kept.origin.x + kept.size.width,
+        kept.origin.y + kept.size.height,
+    );
+    for (from, to) in [
+        (point(left, top), point(kept.origin.x, bottom)),
+        (point(kept_right, top), point(right, bottom)),
+        (point(kept.origin.x, top), point(kept_right, kept.origin.y)),
+        (point(kept.origin.x, kept_bottom), point(kept_right, bottom)),
+    ] {
+        if to.x > from.x && to.y > from.y {
+            window.paint_quad(fill(Bounds::from_corners(from, to), shade));
+        }
+    }
+    window.paint_quad(outline(kept, border, BorderStyle::Solid).border_widths(px(2.)));
 }
 
 /// The largest rectangle of the given aspect ratio centred in `bounds`.

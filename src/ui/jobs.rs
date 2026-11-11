@@ -132,9 +132,16 @@ impl PlicApp {
                     source: entry.file.path.clone(),
                     output,
                     ranges,
-                    mode: self.editor.mode,
+                    // Cropping and rotating are filters, so they re-encode.
+                    mode: if entry.transform.is_identity() {
+                        self.editor.mode
+                    } else {
+                        ffmpeg::ExportMode::Reencode
+                    },
                     source_duration: info.duration,
                     has_audio: info.has_audio,
+                    video_size: info.video_size,
+                    transform: entry.transform,
                 })
             })
             .collect()

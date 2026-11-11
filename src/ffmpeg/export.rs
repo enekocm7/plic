@@ -21,7 +21,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 
-use super::{CommandExt as _, seconds_arg};
+use super::{CommandExt as _, FrameSize, Transform, seconds_arg};
 use crate::trim::TrimRange;
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
@@ -120,6 +120,9 @@ pub struct ExportRequest {
     pub source_duration: Option<Duration>,
     /// Whether the source has sound; joining needs to know up front.
     pub has_audio: bool,
+    /// Display size of the source, needed to crop it.
+    pub video_size: Option<FrameSize>,
+    pub transform: Transform,
 }
 
 /// Lets the UI cancel a running export.
@@ -180,6 +183,16 @@ pub fn export(
     if output.exists() {
         return Err(anyhow::anyhow!("{} already exists", output.display()).into());
     }
+    if request.mode == ExportMode::StreamCopy && !request.transform.is_identity() {
+        return Err(anyhow::anyhow!(
+            "cropping, rotating and flipping need re-encoding; turn off Lossless"
+        )
+        .into());
+    }
+    if request.transform.crop.is_some() && request.video_size.is_none() {
+        return Err(anyhow::anyhow!("the video size is unknown, so it cannot be cropped").into());
+    }
+    let video_filter = request.transform.filter(request.video_size);
     let ranges = effective_ranges(request)?;
     let temporary = create_temp_path(output, "mp4")?;
     // Removes the temporary file on every early return below.
@@ -192,6 +205,9 @@ pub fn export(
     match (request.mode, ranges.as_slice()) {
         (_, [range]) => {
             add_input(&mut command, request, *range);
+            if let Some(filter) = &video_filter {
+                command.arg("-vf").arg(filter);
+            }
         }
         (ExportMode::Reencode, _) => {
             // One seeked input per range, joined by the concat filter: every
@@ -201,7 +217,11 @@ pub fn export(
             }
             command
                 .arg("-filter_complex")
-                .arg(concat_filter(ranges.len(), request.has_audio))
+                .arg(concat_filter(
+                    ranges.len(),
+                    request.has_audio,
+                    video_filter.as_deref(),
+                ))
                 .args(["-map", "[v]"]);
             if request.has_audio {
                 command.args(["-map", "[a]"]);
@@ -315,8 +335,9 @@ fn add_input(command: &mut Command, request: &ExportRequest, range: TrimRange) {
     command.arg("-i").arg(&request.source);
 }
 
-/// `[0:v:0][0:a:0][1:v:0][1:a:0]concat=n=2:v=1:a=1[v][a]`
-fn concat_filter(inputs: usize, has_audio: bool) -> String {
+/// `[0:v:0][0:a:0][1:v:0][1:a:0]concat=n=2:v=1:a=1[v][a]`, with
+/// `video_chain` applied to the joined video when given.
+fn concat_filter(inputs: usize, has_audio: bool, video_chain: Option<&str>) -> String {
     let mut filter = String::new();
     for input in 0..inputs {
         filter.push_str(&format!("[{input}:v:0]"));
@@ -324,12 +345,20 @@ fn concat_filter(inputs: usize, has_audio: bool) -> String {
             filter.push_str(&format!("[{input}:a:0]"));
         }
     }
+    let video_label = if video_chain.is_some() {
+        "[joined]"
+    } else {
+        "[v]"
+    };
     filter.push_str(&format!(
-        "concat=n={inputs}:v=1:a={}[v]",
+        "concat=n={inputs}:v=1:a={}{video_label}",
         u8::from(has_audio)
     ));
     if has_audio {
         filter.push_str("[a]");
+    }
+    if let Some(chain) = video_chain {
+        filter.push_str(&format!(";[joined]{chain}[v]"));
     }
     filter
 }
@@ -497,12 +526,16 @@ mod tests {
     #[test]
     fn builds_the_concat_filter() {
         assert_eq!(
-            concat_filter(2, true),
+            concat_filter(2, true, None),
             "[0:v:0][0:a:0][1:v:0][1:a:0]concat=n=2:v=1:a=1[v][a]"
         );
         assert_eq!(
-            concat_filter(3, false),
+            concat_filter(3, false, None),
             "[0:v:0][1:v:0][2:v:0]concat=n=3:v=1:a=0[v]"
+        );
+        assert_eq!(
+            concat_filter(2, true, Some("hflip")),
+            "[0:v:0][0:a:0][1:v:0][1:a:0]concat=n=2:v=1:a=1[joined][a];[joined]hflip[v]"
         );
     }
 
