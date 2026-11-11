@@ -14,8 +14,11 @@ use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
+
 use super::{frame_image, timeline};
 use crate::{
+    audio::AudioOutput,
     ffmpeg::{self, FrameSize, MediaInfo},
     playback::{MAX_FRAME_RATE, Playback},
     timestamp,
@@ -37,6 +40,28 @@ struct Source {
 impl Source {
     fn frame_rate(&self) -> f64 {
         self.info.frame_rate.unwrap_or(30.0).min(MAX_FRAME_RATE)
+    }
+}
+
+/// The audio device, opened on first playback.
+enum AudioDevice {
+    Unopened,
+    Ready(AudioOutput),
+    Unavailable(SharedString),
+}
+
+impl AudioDevice {
+    fn output(&mut self) -> Option<&mut AudioOutput> {
+        if matches!(self, Self::Unopened) {
+            *self = match AudioOutput::open() {
+                Ok(output) => Self::Ready(output),
+                Err(error) => Self::Unavailable(format!("{error:#}").into()),
+            };
+        }
+        match self {
+            Self::Ready(output) => Some(output),
+            _ => None,
+        }
     }
 }
 
@@ -69,10 +94,30 @@ pub struct Player {
     resume_after_scrub: bool,
     pub(super) scrubbing: bool,
     error: Option<SharedString>,
+    audio: AudioDevice,
+    volume: f32,
+    muted: bool,
+    volume_slider: Entity<SliderState>,
 }
 
 impl Player {
-    pub fn new() -> Self {
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        let volume = 0.8;
+        let volume_slider = cx.new(|_| {
+            SliderState::new()
+                .min(0.)
+                .max(1.)
+                .step(0.01)
+                .default_value(volume)
+        });
+        cx.subscribe(&volume_slider, |this, _, event: &SliderEvent, cx| {
+            let (SliderEvent::Change(value) | SliderEvent::Release(value)) = event;
+            this.volume = value.end();
+            this.muted = false;
+            this.apply_volume();
+            cx.notify();
+        })
+        .detach();
         Self {
             source: None,
             generation: 0,
@@ -88,6 +133,10 @@ impl Player {
             resume_after_scrub: false,
             scrubbing: false,
             error: None,
+            audio: AudioDevice::Unopened,
+            volume,
+            muted: false,
+            volume_slider,
         }
     }
 
@@ -200,7 +249,14 @@ impl Player {
             return;
         };
         let size = self.decode_size(source);
-        match Playback::start(&source.path, from, size, source.frame_rate()) {
+        let audio = if source.info.has_audio {
+            self.audio.output()
+        } else {
+            None
+        };
+        let result = Playback::start(&source.path, from, size, source.frame_rate(), audio);
+        self.apply_volume();
+        match result {
             Ok(playback) => {
                 self.position = from;
                 self.playback = Some(playback);
@@ -260,6 +316,18 @@ impl Player {
             position + interval * frames as u32
         };
         self.seek(target, window, cx);
+    }
+
+    pub fn toggle_mute(&mut self, cx: &mut Context<Self>) {
+        self.muted = !self.muted;
+        self.apply_volume();
+        cx.notify();
+    }
+
+    fn apply_volume(&mut self) {
+        if let AudioDevice::Ready(output) = &self.audio {
+            output.set_volume(if self.muted { 0.0 } else { self.volume });
+        }
     }
 
     pub fn begin_scrub(&mut self, cx: &mut Context<Self>) {
@@ -545,6 +613,36 @@ impl Player {
                             .child(duration.map_or("--:--".into(), timestamp::format_precise)),
                     ),
             )
+            .child(div().flex_1())
+            .child(self.render_volume(cx))
+    }
+
+    fn render_volume(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let has_audio = self
+            .source
+            .as_ref()
+            .is_none_or(|source| source.info.has_audio);
+        let (icon, tooltip): (IconName, SharedString) = match &self.audio {
+            AudioDevice::Unavailable(error) => (
+                IconName::VolumeX,
+                format!("Audio unavailable: {error}").into(),
+            ),
+            _ if !has_audio => (IconName::VolumeX, "This clip has no audio".into()),
+            _ if self.muted || self.volume == 0.0 => (IconName::VolumeX, "Unmute (M)".into()),
+            _ if self.volume < 0.5 => (IconName::Volume1, "Mute (M)".into()),
+            _ => (IconName::Volume2, "Mute (M)".into()),
+        };
+        h_flex()
+            .gap_1()
+            .child(
+                Button::new("mute")
+                    .ghost()
+                    .small()
+                    .icon(icon)
+                    .tooltip(tooltip)
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_mute(cx))),
+            )
+            .child(div().w(px(96.)).child(Slider::new(&self.volume_slider)))
     }
 }
 

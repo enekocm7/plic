@@ -16,8 +16,8 @@ use gpui_kit::*;
 
 use super::{
     CONTEXT, JumpToEnd, JumpToStart, OpenFolder, Reload, SeekBackward, SeekForward, SelectNextClip,
-    SelectPreviousClip, StepBackward, StepForward, TogglePlay, ToggleTheme, frame_image,
-    player::Player,
+    SelectPreviousClip, StepBackward, StepForward, ToggleMute, TogglePlay, ToggleTheme,
+    frame_image, player::Player,
 };
 use crate::{
     ffmpeg::{self, FrameSize, MediaInfo, RawFrame},
@@ -82,7 +82,7 @@ impl PlicApp {
     pub fn new(folder: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
-        let player = cx.new(|_| Player::new());
+        let player = cx.new(Player::new);
         let mut app = Self {
             focus,
             player,
@@ -216,6 +216,10 @@ impl PlicApp {
     fn step_forward(&mut self, _: &StepForward, window: &mut Window, cx: &mut Context<Self>) {
         self.player
             .update(cx, |player, cx| player.step(1, window, cx));
+    }
+
+    fn toggle_mute(&mut self, _: &ToggleMute, _: &mut Window, cx: &mut Context<Self>) {
+        self.player.update(cx, |player, cx| player.toggle_mute(cx));
     }
 
     fn jump_to_start(&mut self, _: &JumpToStart, window: &mut Window, cx: &mut Context<Self>) {
@@ -394,6 +398,7 @@ impl Render for PlicApp {
             .on_action(cx.listener(Self::step_forward))
             .on_action(cx.listener(Self::jump_to_start))
             .on_action(cx.listener(Self::jump_to_end))
+            .on_action(cx.listener(Self::toggle_mute))
             .child(self.render_title_bar(cx))
             .child(
                 h_flex()
