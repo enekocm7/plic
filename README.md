@@ -29,6 +29,13 @@ Without a folder argument, plic opens the current directory.
    `I` and `O` at the playhead, or by typing the times in the export panel.
 3. Name it, choose the destination folder, and press `Ctrl+Enter`.
 
+To keep several parts of one recording, press `N` (or **Add segment at the
+playhead**) to start another segment, and trim it like the first. Click a
+segment on the timeline or in the export panel to edit it. Segments are
+joined in order into one file, or, with **Join into one file** off, saved
+as `name-1`, `name-2`, … The original is only moved to `edited/` once every
+part has exported.
+
 Turn on **Lossless** in the export panel to copy the video instead of
 re-encoding it: the export is near-instant and keeps the original quality,
 but the cut starts on the keyframe at or before the chosen start. The panel

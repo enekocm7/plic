@@ -1,6 +1,7 @@
 //! The main window: clip library, viewer and export panel.
 
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -15,9 +16,10 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use super::{
-    CONTEXT, DeleteClip, ExportClip, JumpToEnd, JumpToIn, JumpToOut, JumpToStart, MarkIn, MarkOut,
-    OpenFolder, Reload, ResetTrim, SeekBackward, SeekForward, SelectNextClip, SelectPreviousClip,
-    ShowShortcuts, StepBackward, StepForward, ToggleLoop, ToggleMute, TogglePlay, ToggleTheme,
+    AddSegment, CONTEXT, DeleteClip, ExportClip, JumpToEnd, JumpToIn, JumpToOut, JumpToStart,
+    MarkIn, MarkOut, OpenFolder, Reload, ResetTrim, SeekBackward, SeekForward, SelectNextClip,
+    SelectPreviousClip, ShowShortcuts, StepBackward, StepForward, ToggleLoop, ToggleMute,
+    TogglePlay, ToggleTheme,
     editor::Editor,
     frame_image,
     jobs::ExportJob,
@@ -27,7 +29,7 @@ use super::{
 use crate::{
     ffmpeg::{self, FrameSize, MediaInfo, RawFrame},
     library::{self, ClipFile, Library},
-    trim::TrimRange,
+    trim::{Segments, TrimRange},
     worker::WorkerPool,
 };
 
@@ -60,20 +62,25 @@ pub struct ClipEntry {
     pub details: Details,
     pub thumbnail: Option<Arc<RenderImage>>,
     pub name: String,
-    pub trim: TrimRange,
+    pub segments: Segments,
     /// Destination chosen for this clip, if it differs from the default.
     pub folder: Option<PathBuf>,
     pub status: ClipStatus,
 }
 
 impl ClipEntry {
+    /// The segment being edited.
+    pub fn trim(&self) -> TrimRange {
+        self.segments.active()
+    }
+
     fn new(file: ClipFile) -> Self {
         Self {
             name: file.stem(),
             file,
             details: Details::Loading,
             thumbnail: None,
-            trim: TrimRange::default(),
+            segments: Segments::default(),
             folder: None,
             status: ClipStatus::Pending,
         }
@@ -118,6 +125,9 @@ pub struct PlicApp {
     stale_images: Vec<Arc<RenderImage>>,
     pub(super) jobs: Vec<ExportJob>,
     pub(super) next_job_id: u64,
+    /// Batches of separate-part exports in which a part failed or was
+    /// cancelled, so the original is kept when the rest finish.
+    pub(super) failed_batches: HashSet<u64>,
 }
 
 impl PlicApp {
@@ -152,6 +162,7 @@ impl PlicApp {
             stale_images: Vec::new(),
             jobs: Vec::new(),
             next_job_id: 0,
+            failed_batches: HashSet::new(),
         };
         if let Some(folder) = folder {
             app.load_folder(folder, window, cx);
@@ -365,7 +376,7 @@ impl PlicApp {
     pub(super) fn settle(&mut self, mut entry: ClipEntry, archived: PathBuf) {
         entry.file.path = archived;
         entry.status = ClipStatus::Pending;
-        entry.trim = TrimRange::default();
+        entry.segments = Segments::default();
         self.settled.insert(0, entry);
         if let Some(selected) = &mut self.settled_selected {
             *selected += 1;
@@ -409,9 +420,9 @@ impl PlicApp {
             .update(cx, |player, cx| player.set_trimmable(trimmable, cx));
         match &entry.details {
             Details::Ready(info) => {
-                let (info, trim) = (info.clone(), entry.trim);
+                let (info, segments) = (info.clone(), entry.segments.clone());
                 self.player
-                    .update(cx, |player, cx| player.load(path, info, trim, cx));
+                    .update(cx, |player, cx| player.load(path, info, segments, cx));
             }
             Details::Loading => self.player.update(cx, |player, cx| player.clear(cx)),
             Details::Failed(error) => {
@@ -430,9 +441,9 @@ impl PlicApp {
         cx: &mut Context<Self>,
     ) {
         match event {
-            PlayerEvent::TrimChanged(trim) => {
+            PlayerEvent::SegmentsChanged(segments) => {
                 if let Some(entry) = self.current_mut() {
-                    entry.trim = *trim;
+                    entry.segments = segments.clone();
                     self.sync_time_fields(window, cx);
                     cx.notify();
                 }
@@ -454,6 +465,10 @@ impl PlicApp {
 
     fn mark_out(&mut self, _: &MarkOut, _: &mut Window, cx: &mut Context<Self>) {
         self.player.update(cx, |player, cx| player.mark_out(cx));
+    }
+
+    fn add_segment_action(&mut self, _: &AddSegment, window: &mut Window, cx: &mut Context<Self>) {
+        self.add_segment(window, cx);
     }
 
     fn reset_trim(&mut self, _: &ResetTrim, _: &mut Window, cx: &mut Context<Self>) {
@@ -745,6 +760,7 @@ impl Render for PlicApp {
             .on_action(cx.listener(Self::mark_in))
             .on_action(cx.listener(Self::mark_out))
             .on_action(cx.listener(Self::reset_trim))
+            .on_action(cx.listener(Self::add_segment_action))
             .on_action(cx.listener(Self::toggle_loop))
             .on_action(cx.listener(Self::jump_to_in))
             .on_action(cx.listener(Self::jump_to_out))

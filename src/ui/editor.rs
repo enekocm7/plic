@@ -1,8 +1,10 @@
 //! The export panel: output name, trim range and destination of the
 //! selected clip.
 //!
-//! The text fields and the timeline edit the same range. Typing a valid
-//! time moves the handles; dragging a handle rewrites the text.
+//! The text fields and the timeline edit the same range, the clip's active
+//! segment. Typing a valid time moves the handles; dragging a handle
+//! rewrites the text. With several segments, a list picks the active one and
+//! a switch decides whether they are joined or saved as separate files.
 
 use std::{
     collections::HashMap,
@@ -24,6 +26,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use super::AddSegment;
 use super::app::{ClipEntry, ClipStatus, PlicApp, display_name};
 use super::library_panel::format_size;
 use crate::{
@@ -72,6 +75,8 @@ pub struct Editor {
     pub(super) export_error: Option<SharedString>,
     /// How exports are written. Kept while moving between clips.
     pub(super) mode: ExportMode,
+    /// Whether several segments become one file or one file each.
+    pub(super) join: bool,
     /// Keyframe at or before a clip's start, by clip and requested start.
     keyframes: HashMap<(PathBuf, Duration), Keyframe>,
     /// Whether a keyframe lookup is running. Only one runs at a time; the
@@ -115,6 +120,7 @@ impl Editor {
             time_error: None,
             export_error: None,
             mode: ExportMode::default(),
+            join: true,
             keyframes: HashMap::new(),
             keyframe_pending: false,
             _subscriptions: subscriptions,
@@ -151,7 +157,7 @@ impl PlicApp {
 
     /// Rewrites the start and end fields from the selected clip's range.
     pub(super) fn sync_time_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let trim = self.current().map(|entry| entry.trim).unwrap_or_default();
+        let trim = self.current().map(|entry| entry.trim()).unwrap_or_default();
         let start = timestamp::format(trim.start);
         let end = trim.end.map(timestamp::format).unwrap_or_default();
         self.editor
@@ -226,7 +232,7 @@ impl PlicApp {
         let end_text = self.editor.end.read(cx).value();
         let Some(duration_and_trim) = self
             .current()
-            .map(|entry| (entry.info().and_then(|info| info.duration), entry.trim))
+            .map(|entry| (entry.info().and_then(|info| info.duration), entry.trim()))
         else {
             return;
         };
@@ -256,7 +262,7 @@ impl PlicApp {
                 self.editor.time_error = None;
                 self.editor.export_error = None;
                 if let Some(entry) = self.current_mut() {
-                    entry.trim = trim;
+                    entry.segments.set_active(trim);
                 }
                 self.player
                     .update(cx, |player, cx| player.set_trim(trim, cx));
@@ -467,6 +473,143 @@ impl PlicApp {
         None
     }
 
+    pub(super) fn add_segment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let added = self.player.update(cx, |player, cx| player.add_segment(cx));
+        if added {
+            self.sync_time_fields(window, cx);
+        } else if self.current().is_some() {
+            window.push_notification(
+                Notification::warning(
+                    "A segment already starts at the playhead, or it is at the end.",
+                )
+                .title("Could not add a segment"),
+                cx,
+            );
+        }
+    }
+
+    fn select_segment(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.player
+            .update(cx, |player, cx| player.select_segment(index, window, cx));
+        self.editor.time_error = None;
+        self.sync_time_fields(window, cx);
+    }
+
+    fn remove_segment(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.player
+            .update(cx, |player, cx| player.remove_segment(index, cx));
+        self.editor.time_error = None;
+        self.sync_time_fields(window, cx);
+    }
+
+    fn set_join(&mut self, join: bool, cx: &mut Context<Self>) {
+        self.editor.join = join;
+        self.editor.export_error = None;
+        cx.notify();
+    }
+
+    /// The segment list, with the active one highlighted, and the choice
+    /// between one joined file and one file per segment.
+    fn render_segments(&self, entry: &ClipEntry, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let segments = &entry.segments;
+        let duration = entry.info().and_then(|info| info.duration);
+        let active = segments.active_index();
+        let multiple = segments.len() > 1;
+        let rows = segments
+            .ranges()
+            .iter()
+            .enumerate()
+            .map(|(index, range)| {
+                let end = range
+                    .resolved_end(duration)
+                    .map_or("end".to_string(), timestamp::format);
+                let is_active = index == active;
+                h_flex()
+                    .id(("segment", index))
+                    .h(px(28.))
+                    .pl_2()
+                    .gap_2()
+                    .rounded(theme.radius)
+                    .text_sm()
+                    .cursor_pointer()
+                    .when(is_active, |row| row.bg(theme.muted))
+                    .hover(|row| row.bg(theme.muted))
+                    .child(
+                        div()
+                            .w(px(8.))
+                            .h(px(8.))
+                            .rounded_full()
+                            .when(is_active, |dot| dot.bg(theme.yellow))
+                            .when(!is_active, |dot| {
+                                dot.border_1().border_color(theme.yellow.opacity(0.6))
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .font_family(theme.mono_font_family.clone())
+                            .text_xs()
+                            .child(format!("{} – {end}", timestamp::format(range.start))),
+                    )
+                    .child(
+                        Button::new(("remove-segment", index))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::X)
+                            .tooltip("Remove this segment")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.remove_segment(index, window, cx)
+                            })),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.select_segment(index, window, cx)
+                    }))
+            })
+            .collect::<Vec<_>>();
+
+        v_flex()
+            .gap_1()
+            .when(multiple, |list| list.children(rows))
+            .child(
+                Button::new("add-segment")
+                    .ghost()
+                    .small()
+                    .w_full()
+                    .icon(IconName::Plus)
+                    .label("Add segment at the playhead")
+                    .tooltip_with_action("Add a segment", &AddSegment, Some(super::CONTEXT))
+                    .on_click(cx.listener(|this, _, window, cx| this.add_segment(window, cx))),
+            )
+            .when(multiple, |list| {
+                list.child(
+                    h_flex()
+                        .pt_1()
+                        .gap_2()
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .child(div().text_sm().child("Join into one file"))
+                                .child(div().text_xs().text_color(theme.muted_foreground).child(
+                                    if self.editor.join {
+                                        "Segments play back to back, in order"
+                                    } else {
+                                        "Each segment is saved as name-1, name-2, …"
+                                    },
+                                )),
+                        )
+                        .child(
+                            Switch::new("join-segments")
+                                .checked(self.editor.join)
+                                .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                    this.set_join(*checked, cx)
+                                })),
+                        ),
+                )
+            })
+    }
+
     fn set_mode(&mut self, lossless: bool, cx: &mut Context<Self>) {
         self.editor.mode = if lossless {
             ExportMode::StreamCopy
@@ -482,7 +625,7 @@ impl PlicApp {
         // Resolved before `entry` borrows `self` for the rest of the render.
         let keyframe = match self.current() {
             Some(entry) if lossless && entry.info().is_some() => {
-                let (path, start) = (entry.file.path.clone(), entry.trim.start);
+                let (path, start) = (entry.file.path.clone(), entry.trim().start);
                 Some(self.keyframe_for(&path, start, cx))
             }
             _ => None,
@@ -492,7 +635,7 @@ impl PlicApp {
         let enabled = entry.is_some_and(|entry| entry.info().is_some());
         let exporting = entry.is_some_and(|entry| entry.status == ClipStatus::Exporting);
         let duration = entry.and_then(|entry| entry.info()?.duration);
-        let trim = entry.map(|entry| entry.trim).unwrap_or_default();
+        let trim = entry.map(|entry| entry.trim()).unwrap_or_default();
         let destination = entry
             .and_then(|entry| self.destination(entry))
             .map(display_name);
@@ -540,7 +683,13 @@ impl PlicApp {
             Some(Some(Keyframe::Found(start))) => *start,
             _ => trim.start,
         };
-        let length = TrimRange::new(effective_start, trim.end).length(duration);
+        let segment_count = entry.map_or(1, |entry| entry.segments.len());
+        let length = entry.and_then(|entry| {
+            let others = entry.segments.total_length(duration)?;
+            let active = trim.length(duration)?;
+            let effective = TrimRange::new(effective_start, trim.end).length(duration)?;
+            Some(others - active + effective)
+        });
         let estimate = entry
             .zip(duration)
             .zip(length)
@@ -568,7 +717,9 @@ impl PlicApp {
             )
             .when_some(duration, |row, duration| {
                 row.child(div().text_xs().text_color(theme.muted_foreground).child(
-                    if trim.is_full(Some(duration)) {
+                    if segment_count > 1 && !self.editor.join {
+                        format!("in {segment_count} files")
+                    } else if segment_count == 1 && trim.is_full(Some(duration)) {
                         "whole clip".to_string()
                     } else {
                         format!("of {}", timestamp::format_coarse(duration))
@@ -640,7 +791,12 @@ impl PlicApp {
                     ),
             );
 
+        let separate = segment_count > 1 && !self.editor.join;
         let output_preview = match (&destination, output_name.is_empty()) {
+            (Some(folder), false) if separate => Some(format!(
+                "{folder}{}{output_name}-1.mp4 … -{segment_count}.mp4",
+                std::path::MAIN_SEPARATOR
+            )),
             (Some(folder), false) => Some(format!(
                 "{folder}{}{output_name}.mp4",
                 std::path::MAIN_SEPARATOR
@@ -719,6 +875,9 @@ impl PlicApp {
                                     )
                                 }),
                         )
+                        .when_some(entry, |panel, entry| {
+                            panel.child(self.render_segments(entry, cx))
+                        })
                         .child(summary)
                         .child(v_flex().gap_1p5().child(mode_row).children(snapped))
                         .child(

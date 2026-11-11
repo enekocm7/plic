@@ -2,7 +2,9 @@
 //! playhead drawn over it.
 //!
 //! Press anywhere to move the playhead and drag to scrub; drag the handles
-//! at either end of the highlighted range to trim.
+//! at either end of the highlighted range to trim. A clip can have several
+//! segments: the active one has handles, and pressing inside another one
+//! makes it active.
 
 use std::{sync::Arc, time::Duration};
 
@@ -10,7 +12,7 @@ use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
 
 use super::player::Player;
-use crate::trim::TrimRange;
+use crate::trim::{Segments, TrimRange};
 
 const STRIP_HEIGHT: f32 = 44.;
 /// Room above the strip for the playhead knob.
@@ -36,8 +38,8 @@ pub enum Drag {
 pub struct TimelineState {
     pub duration: Option<Duration>,
     pub position: Duration,
-    /// `None` hides the trim handles, for clips that are only viewed.
-    pub trim: Option<TrimRange>,
+    /// `None` hides the segments, for clips that are only viewed.
+    pub segments: Option<Segments>,
     pub filmstrip: Vec<Option<Arc<RenderImage>>>,
     pub drag: Option<Drag>,
     pub aspect_ratio: f32,
@@ -71,7 +73,94 @@ impl Scale {
     }
 }
 
-/// Positions of the trim handles, used for both drawing and hit testing.
+/// Horizontal extent of a range on the strip.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Span {
+    start: Pixels,
+    end: Pixels,
+}
+
+impl Span {
+    fn new(scale: &Scale, range: TrimRange) -> Self {
+        Self {
+            start: scale.x(range.start),
+            end: scale.x(range
+                .resolved_end(Some(scale.duration))
+                .unwrap_or(scale.duration)),
+        }
+    }
+
+    fn contains(&self, x: Pixels) -> bool {
+        x >= self.start && x <= self.end
+    }
+}
+
+/// Every segment's position on the strip, used for drawing and hit testing.
+#[derive(Clone)]
+struct Layout {
+    spans: Vec<Span>,
+    active: usize,
+}
+
+impl Layout {
+    fn new(scale: &Scale, segments: &Segments) -> Self {
+        Self {
+            spans: segments
+                .ranges()
+                .iter()
+                .map(|range| Span::new(scale, *range))
+                .collect(),
+            active: segments.active_index(),
+        }
+    }
+
+    fn handles(&self) -> Handles {
+        let span = self.spans[self.active];
+        Handles {
+            start: span.start,
+            end: span.end,
+        }
+    }
+
+    /// The inactive segment under `x`, if any. Inside the active segment
+    /// the press is for the playhead.
+    fn inactive_at(&self, x: Pixels) -> Option<usize> {
+        if self.spans[self.active].contains(x) {
+            return None;
+        }
+        self.spans.iter().position(|span| span.contains(x))
+    }
+
+    /// The parts of the strip outside every segment.
+    fn gaps(&self, left: Pixels, right: Pixels) -> Vec<Span> {
+        let mut spans = self.spans.clone();
+        spans.sort_by(|a, b| {
+            a.start
+                .partial_cmp(&b.start)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut gaps = Vec::new();
+        let mut covered_to = left;
+        for span in spans {
+            if span.start > covered_to {
+                gaps.push(Span {
+                    start: covered_to,
+                    end: span.start,
+                });
+            }
+            covered_to = covered_to.max(span.end);
+        }
+        if covered_to < right {
+            gaps.push(Span {
+                start: covered_to,
+                end: right,
+            });
+        }
+        gaps
+    }
+}
+
+/// Positions of the active segment's trim handles.
 #[derive(Clone, Copy)]
 struct Handles {
     start: Pixels,
@@ -79,15 +168,6 @@ struct Handles {
 }
 
 impl Handles {
-    fn new(scale: &Scale, trim: TrimRange) -> Self {
-        Self {
-            start: scale.x(trim.start),
-            end: scale.x(trim
-                .resolved_end(Some(scale.duration))
-                .unwrap_or(scale.duration)),
-        }
-    }
-
     /// What a press at `position` drags.
     ///
     /// The band above the strip, where the knob sits, always moves the
@@ -135,11 +215,15 @@ pub fn render(state: TimelineState, cx: &mut Context<Player>) -> impl IntoElemen
                 origin: point(scale.left, bounds.origin.y + px(STRIP_TOP)),
                 size: size(scale.width, px(STRIP_HEIGHT)),
             };
-            let handles = state.trim.map(|trim| Handles::new(&scale, trim));
+            let layout = state
+                .segments
+                .as_ref()
+                .map(|segments| Layout::new(&scale, segments));
+            let handles = layout.as_ref().map(Layout::handles);
 
             paint_filmstrip(window, strip, &state, &colors);
-            if let Some(handles) = handles {
-                paint_selection(window, strip, handles, &colors);
+            if let Some(layout) = &layout {
+                paint_selection(window, strip, layout, &colors);
             }
             paint_playhead(window, strip, scale.x(state.position), &colors);
 
@@ -151,7 +235,7 @@ pub fn render(state: TimelineState, cx: &mut Context<Player>) -> impl IntoElemen
                 _ => CursorStyle::PointingHand,
             };
             window.set_cursor_style(cursor, &hitbox);
-            register_dragging(this.clone(), hitbox, scale, handles, strip.origin.y, window);
+            register_dragging(this.clone(), hitbox, scale, layout, strip, window);
         },
     )
     .w_full()
@@ -208,29 +292,43 @@ fn paint_filmstrip(
     }
 }
 
-fn paint_selection(window: &mut Window, strip: Bounds<Pixels>, handles: Handles, colors: &Colors) {
+fn paint_selection(window: &mut Window, strip: Bounds<Pixels>, layout: &Layout, colors: &Colors) {
     let top = strip.origin.y;
     let height = strip.size.height;
     let left_edge = strip.origin.x;
     let right_edge = strip.origin.x + strip.size.width;
 
     // Darken what will be cut away.
-    if handles.start > left_edge {
-        let cut = Bounds::from_corners(point(left_edge, top), point(handles.start, top + height));
+    for gap in layout.gaps(left_edge, right_edge) {
+        let cut = Bounds::from_corners(point(gap.start, top), point(gap.end, top + height));
+        let at_left = gap.start <= left_edge;
+        let at_right = gap.end >= right_edge;
+        let radius = |round: bool| if round { px(RADIUS) } else { px(0.) };
         window.paint_quad(fill(cut, colors.dim).corner_radii(Corners {
-            top_left: px(RADIUS),
-            bottom_left: px(RADIUS),
-            ..Default::default()
+            top_left: radius(at_left),
+            bottom_left: radius(at_left),
+            top_right: radius(at_right),
+            bottom_right: radius(at_right),
         }));
     }
-    if handles.end < right_edge {
-        let cut = Bounds::from_corners(point(handles.end, top), point(right_edge, top + height));
-        window.paint_quad(fill(cut, colors.dim).corner_radii(Corners {
-            top_right: px(RADIUS),
-            bottom_right: px(RADIUS),
-            ..Default::default()
-        }));
+
+    // The other segments get a thin frame; only the active one has handles.
+    for (index, span) in layout.spans.iter().enumerate() {
+        if index == layout.active {
+            continue;
+        }
+        let frame = Bounds::from_corners(
+            point(span.start, top - px(FRAME_BORDER)),
+            point(span.end, top + height + px(FRAME_BORDER)),
+        );
+        window.paint_quad(
+            outline(frame, colors.selection.opacity(0.6), BorderStyle::Solid)
+                .border_widths(px(FRAME_BORDER))
+                .corner_radii(px(RADIUS / 2.)),
+        );
     }
+
+    let handles = layout.handles();
 
     // Frame the kept range, with grab handles on its ends.
     let frame = Bounds::from_corners(
@@ -290,10 +388,12 @@ fn register_dragging(
     this: WeakEntity<Player>,
     hitbox: Hitbox,
     scale: Scale,
-    handles: Option<Handles>,
-    strip_top: Pixels,
+    layout: Option<Layout>,
+    strip: Bounds<Pixels>,
     window: &mut Window,
 ) {
+    let handles = layout.as_ref().map(Layout::handles);
+    let strip_top = strip.origin.y;
     window.on_mouse_event({
         let this = this.clone();
         move |event: &MouseDownEvent, phase, window, cx| {
@@ -304,7 +404,15 @@ fn register_dragging(
                 return;
             }
             let drag = pick(handles, event.position, strip_top);
+            // Pressing inside another segment makes it the active one.
+            let segment = layout
+                .as_ref()
+                .filter(|_| drag == Drag::Playhead && strip.contains(&event.position))
+                .and_then(|layout| layout.inactive_at(event.position.x));
             this.update(cx, |player, cx| {
+                if let Some(index) = segment {
+                    player.select_segment(index, window, cx);
+                }
                 player.begin_drag(drag, cx);
                 // Grabbing a handle should not make it jump to the pointer.
                 if drag == Drag::Playhead {
@@ -343,8 +451,8 @@ mod tests {
 
     use gpui_kit::{Bounds, point, px, size};
 
-    use super::{Drag, HEIGHT, Handles, INSET, STRIP_TOP, Scale};
-    use crate::trim::TrimRange;
+    use super::{Drag, HEIGHT, INSET, Layout, STRIP_TOP, Scale, Span};
+    use crate::trim::{Segments, TrimRange};
 
     fn scale() -> Scale {
         let bounds = Bounds {
@@ -366,10 +474,12 @@ mod tests {
 
     #[test]
     fn handle_tabs_grab_trim_points_and_the_rest_moves_the_playhead() {
-        let handles = Handles::new(
-            &scale(),
-            TrimRange::new(Duration::from_secs(10), Some(Duration::from_secs(60))),
-        );
+        let mut segments = Segments::default();
+        segments.set_active(TrimRange::new(
+            Duration::from_secs(10),
+            Some(Duration::from_secs(60)),
+        ));
+        let handles = Layout::new(&scale(), &segments).handles();
         let strip_top = px(STRIP_TOP);
         let at = |x: f32, y: f32| point(px(INSET + x), px(y));
         let in_strip = STRIP_TOP + 10.;
@@ -380,5 +490,32 @@ mod tests {
         assert_eq!(handles.pick(at(102., in_strip), strip_top), Drag::Playhead);
         assert_eq!(handles.pick(at(98., 4.), strip_top), Drag::Playhead);
         assert_eq!(handles.pick(at(300., in_strip), strip_top), Drag::Playhead);
+    }
+
+    #[test]
+    fn finds_gaps_and_inactive_segments() {
+        let mut segments = Segments::default();
+        segments.set_active(TrimRange::new(
+            Duration::from_secs(10),
+            Some(Duration::from_secs(20)),
+        ));
+        segments.add(Duration::from_secs(50), Some(Duration::from_secs(100)));
+        segments.set_active(TrimRange::new(
+            Duration::from_secs(50),
+            Some(Duration::from_secs(60)),
+        ));
+        segments.select(0);
+        let layout = Layout::new(&scale(), &segments);
+        let span = |start: f32, end: f32| Span {
+            start: px(INSET + start),
+            end: px(INSET + end),
+        };
+        assert_eq!(
+            layout.gaps(px(INSET), px(INSET + 1000.)),
+            vec![span(0., 100.), span(200., 500.), span(600., 1000.)]
+        );
+        assert_eq!(layout.inactive_at(px(INSET + 550.)), Some(1));
+        assert_eq!(layout.inactive_at(px(INSET + 150.)), None);
+        assert_eq!(layout.inactive_at(px(INSET + 300.)), None);
     }
 }

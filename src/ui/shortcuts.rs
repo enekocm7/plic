@@ -31,6 +31,7 @@ const GROUPS: &[Group] = &[
             (&["o"], "End at the playhead"),
             (&["shift-i", "shift-o"], "Jump to start or end"),
             (&["x"], "Reset to the whole clip"),
+            (&["n"], "Add a segment at the playhead"),
             (&["r"], "Loop the selection"),
         ],
     ),
