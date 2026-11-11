@@ -27,7 +27,7 @@ use super::{
     graph::{self, AudioAdjust, AudioPlan},
     seconds_arg, transform,
 };
-use crate::trim::TrimRange;
+use crate::{scheduler::Workload, trim::TrimRange};
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 /// How the trimmed range is written.
@@ -73,6 +73,24 @@ pub struct ExportRequest {
 /// Lets the UI cancel a running export.
 #[derive(Debug, Clone, Default)]
 pub struct CancelToken(Arc<AtomicBool>);
+
+impl ExportRequest {
+    /// What running this export keeps busy.
+    pub fn workload(&self) -> Workload {
+        if self.format.is_animation() || self.video.target_size.is_some() {
+            // Animations and size targets always encode in software.
+            return Workload::Software;
+        }
+        match self.mode {
+            ExportMode::StreamCopy => Workload::Copy,
+            // Not probed yet: assume the scarcer hardware sessions.
+            ExportMode::Reencode => match super::uses_hardware(self.video.codec) {
+                Some(false) => Workload::Software,
+                _ => Workload::Hardware,
+            },
+        }
+    }
+}
 
 impl CancelToken {
     pub fn cancel(&self) {

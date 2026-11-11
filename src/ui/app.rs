@@ -146,6 +146,8 @@ pub struct PlicApp {
     /// Images to evict from the GPU atlas on the next frame.
     stale_images: Vec<Arc<RenderImage>>,
     pub(super) jobs: Vec<ExportJob>,
+    /// How many exports may encode at once.
+    pub(super) parallel_exports: usize,
     pub(super) next_job_id: u64,
     /// Batches of separate-part exports in which a part failed or was
     /// cancelled, so the original is kept when the rest finish.
@@ -185,6 +187,7 @@ impl PlicApp {
             generation: 0,
             stale_images: Vec::new(),
             jobs: Vec::new(),
+            parallel_exports: 2,
             next_job_id: 0,
             failed_batches: HashSet::new(),
             finished: Vec::new(),

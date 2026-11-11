@@ -7,6 +7,7 @@ mod clipboard;
 mod ffmpeg;
 mod library;
 mod playback;
+mod scheduler;
 mod timestamp;
 mod trim;
 mod ui;
