@@ -22,7 +22,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 
 use super::{
-    CommandExt as _, FrameSize, OutputLimits, Transform,
+    Animation, CommandExt as _, Format, FrameSize, OutputLimits, Transform,
     encoder::{self, VideoEncoding},
     graph::{self, AudioAdjust, AudioPlan},
     seconds_arg, transform,
@@ -65,6 +65,9 @@ pub struct ExportRequest {
     pub limits: OutputLimits,
     /// Frame rate of the source, so a cap never adds frames.
     pub frame_rate: Option<f64>,
+    /// MP4, or an animated GIF or WebP made with `animation`.
+    pub format: Format,
+    pub animation: Animation,
 }
 
 /// Lets the UI cancel a running export.
@@ -141,7 +144,7 @@ pub fn export(
         .iter()
         .map(|range| range.length(request.source_duration))
         .sum::<Option<Duration>>();
-    let temporary = create_temp_path(output, "mp4")?;
+    let temporary = create_temp_path(output, request.format.extension())?;
     // Removes the temporary file on every early return below.
     let guard = TempFile(&temporary);
 
@@ -162,6 +165,43 @@ pub fn export(
         audio,
         video_filter: video_filter.as_deref(),
     };
+
+    if request.format.is_animation() {
+        // Silent, shrunk and slowed down; the size limits do not apply.
+        let mut chain: Vec<String> = request
+            .transform
+            .filter(request.video_size)
+            .into_iter()
+            .collect();
+        chain.push(request.animation.chain(request.format));
+        let chain = chain.join(",");
+        let parts = Parts {
+            audio: AudioPlan {
+                tracks: &[],
+                chain: None,
+            },
+            video_filter: Some(&chain),
+            ..parts
+        };
+        let args: Vec<String> = request
+            .format
+            .encoder_args()
+            .iter()
+            .map(|arg| arg.to_string())
+            .collect();
+        let command = parts.reencode(&args, &[], None, 0);
+        run(
+            command,
+            Output::File(&temporary),
+            cancel,
+            expected,
+            &mut on_progress,
+        )?;
+        on_progress(1.0);
+        publish(&temporary, output)?;
+        drop(guard);
+        return Ok(output.clone());
+    }
 
     match request.mode {
         ExportMode::Reencode => {
@@ -390,7 +430,9 @@ fn run(
 ) -> Result<(), ExportError> {
     match output {
         Output::File(path) => {
-            command.args(["-movflags", "+faststart"]);
+            if path.extension().is_some_and(|extension| extension == "mp4") {
+                command.args(["-movflags", "+faststart"]);
+            }
             command.args(["-progress", "pipe:1"]).arg(path);
         }
         Output::Null => {
@@ -745,6 +787,8 @@ mod tests {
             transform: Transform::default(),
             limits: OutputLimits::default(),
             frame_rate: Some(30.0),
+            format: Format::Mp4,
+            animation: Animation::default(),
         };
         let output = export(&request, &CancelToken::default(), |_| {}).unwrap();
         let size = fs::metadata(&output).unwrap().len();
@@ -754,6 +798,62 @@ mod tests {
         assert!(size > target / 2, "{size} bytes is far under the target");
         // Only the source and the export remain: no pass logs or temporaries.
         assert_eq!(leftovers, 2);
+    }
+
+    /// Needs ffmpeg on PATH: `cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    fn exports_animated_gif_and_webp() {
+        let dir = std::env::temp_dir().join(format!("plic-anim-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.mp4");
+        let made = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+            ])
+            .arg("testsrc2=s=1280x720:r=60:d=4")
+            .args([
+                "-f", "lavfi", "-i", "sine=d=4", "-c:v", "libx264", "-c:a", "aac",
+            ])
+            .args(["-shortest"])
+            .arg(&source)
+            .status()
+            .unwrap();
+        assert!(made.success());
+
+        for (format, magic) in [(Format::Gif, &b"GIF89a"[..]), (Format::Webp, &b"RIFF"[..])] {
+            let request = ExportRequest {
+                source: source.clone(),
+                output: dir.join(format!("out.{}", format.extension())),
+                ranges: vec![TrimRange::new(
+                    Duration::from_secs(1),
+                    Some(Duration::from_secs(3)),
+                )],
+                mode: ExportMode::Reencode,
+                video: VideoEncoding::default(),
+                source_duration: Some(Duration::from_secs(4)),
+                audio_tracks: vec![0],
+                audio_adjust: AudioAdjust::default(),
+                video_size: Some(FrameSize::new(1280, 720)),
+                transform: Transform::default(),
+                limits: OutputLimits::default(),
+                frame_rate: Some(60.0),
+                format,
+                animation: Animation::default(),
+            };
+            let output = export(&request, &CancelToken::default(), |_| {}).unwrap();
+            let bytes = fs::read(&output).unwrap();
+            assert!(bytes.starts_with(magic), "{format:?} has the wrong header");
+        }
+        let leftovers = fs::read_dir(&dir).unwrap().count();
+        fs::remove_dir_all(&dir).ok();
+        assert_eq!(leftovers, 3);
     }
 
     #[test]

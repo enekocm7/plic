@@ -125,7 +125,8 @@ impl PlicApp {
         parts
             .into_iter()
             .map(|(name, ranges)| {
-                let output = folder.join(format!("{name}.mp4"));
+                let extension = self.editor.format.extension();
+                let output = folder.join(format!("{name}.{extension}"));
                 let taken =
                     output.exists() || self.jobs.iter().any(|job| job.request.output == output);
                 if taken {
@@ -158,6 +159,8 @@ impl PlicApp {
                         ffmpeg::OutputLimits::default()
                     },
                     frame_rate: info.frame_rate,
+                    format: self.editor.format,
+                    animation: self.editor.animation,
                 })
             })
             .collect()
