@@ -16,13 +16,13 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use super::{
-    AddSegment, CONTEXT, DeleteClip, ExportClip, JumpToEnd, JumpToIn, JumpToOut, JumpToStart,
-    MarkIn, MarkOut, OpenFolder, Reload, ResetTrim, SaveFrame, SaveFrameJpeg, SeekBackward,
-    SeekForward, SelectNextClip, SelectPreviousClip, ShowShortcuts, SplitAtPlayhead, StepBackward,
-    StepForward, ToggleLoop, ToggleMute, TogglePlay, ToggleTheme,
+    AddSegment, CONTEXT, CopyLastExport, DeleteClip, ExportClip, JumpToEnd, JumpToIn, JumpToOut,
+    JumpToStart, MarkIn, MarkOut, OpenFolder, Reload, ResetTrim, SaveFrame, SaveFrameJpeg,
+    SeekBackward, SeekForward, SelectNextClip, SelectPreviousClip, ShowShortcuts, SplitAtPlayhead,
+    StepBackward, StepForward, ToggleLoop, ToggleMute, TogglePlay, ToggleTheme,
     editor::Editor,
     frame_image,
-    jobs::ExportJob,
+    jobs::{ExportJob, FinishedExport},
     player::{Player, PlayerEvent},
     shortcuts,
 };
@@ -150,6 +150,8 @@ pub struct PlicApp {
     /// Batches of separate-part exports in which a part failed or was
     /// cancelled, so the original is kept when the rest finish.
     pub(super) failed_batches: HashSet<u64>,
+    /// Recently exported files, newest first, for copying or showing.
+    pub(super) finished: Vec<FinishedExport>,
 }
 
 impl PlicApp {
@@ -185,6 +187,7 @@ impl PlicApp {
             jobs: Vec::new(),
             next_job_id: 0,
             failed_batches: HashSet::new(),
+            finished: Vec::new(),
         };
         if let Some(folder) = folder {
             app.load_folder(folder, window, cx);
@@ -512,6 +515,23 @@ impl PlicApp {
         self.save_frame(ffmpeg::ImageFormat::Jpeg, window, cx);
     }
 
+    fn copy_last_export(
+        &mut self,
+        _: &CopyLastExport,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.finished.first().map(|finished| finished.path.clone()) {
+            Some(path) => self.copy_export(&path, window, cx),
+            None => gpui_kit::component::WindowExt::push_notification(
+                window,
+                gpui_kit::component::notification::Notification::info("Export a clip first.")
+                    .title("Nothing to copy"),
+                cx,
+            ),
+        }
+    }
+
     fn split_action(&mut self, _: &SplitAtPlayhead, window: &mut Window, cx: &mut Context<Self>) {
         self.split_at_playhead(window, cx);
     }
@@ -807,6 +827,7 @@ impl Render for PlicApp {
             .on_action(cx.listener(Self::reset_trim))
             .on_action(cx.listener(Self::add_segment_action))
             .on_action(cx.listener(Self::split_action))
+            .on_action(cx.listener(Self::copy_last_export))
             .on_action(cx.listener(Self::save_frame_png))
             .on_action(cx.listener(Self::save_frame_jpeg))
             .on_action(cx.listener(Self::toggle_loop))

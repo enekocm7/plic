@@ -3,6 +3,7 @@
 //! plic: watch, trim and file away video clips.
 
 mod audio;
+mod clipboard;
 mod ffmpeg;
 mod library;
 mod playback;
