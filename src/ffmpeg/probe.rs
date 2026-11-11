@@ -52,6 +52,86 @@ pub fn probe(path: &Path) -> Result<MediaInfo> {
     parse(&output.stdout)
 }
 
+/// The time of the last video keyframe at or before `at`: where a stream
+/// copy that is asked to start at `at` really starts.
+pub fn keyframe_at_or_before(path: &Path, at: Duration) -> Result<Duration> {
+    if at.is_zero() {
+        return Ok(Duration::ZERO);
+    }
+    // Seeking lands on the keyframe before the target, so the first packet
+    // read after it is the one we want.
+    let output = Command::new("ffprobe")
+        .args(["-v", "error", "-select_streams", "v:0", "-read_intervals"])
+        .arg(format!("{}%+#1", super::seconds_arg(at)))
+        .args([
+            "-show_entries",
+            "packet=pts_time,flags:stream=start_time",
+            "-print_format",
+            "json",
+        ])
+        .arg(path)
+        .no_window()
+        .stdin(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .context("could not start ffprobe; check that ffmpeg is installed and on PATH")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("ffprobe could not read the file: {}", stderr.trim());
+    }
+    parse_keyframe(&output.stdout, at)
+}
+
+#[derive(Deserialize)]
+struct KeyframeOutput {
+    #[serde(default)]
+    packets: Vec<Packet>,
+    #[serde(default)]
+    streams: Vec<StreamStart>,
+}
+
+#[derive(Deserialize)]
+struct Packet {
+    pts_time: Option<String>,
+    flags: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct StreamStart {
+    start_time: Option<String>,
+}
+
+fn parse_keyframe(json: &[u8], at: Duration) -> Result<Duration> {
+    let output: KeyframeOutput =
+        serde_json::from_slice(json).context("unexpected ffprobe output")?;
+    let packet = output
+        .packets
+        .iter()
+        .find(|packet| {
+            packet
+                .flags
+                .as_deref()
+                .is_some_and(|flags| flags.starts_with('K'))
+        })
+        .context("no keyframe found before the start")?;
+    let pts: f64 = packet
+        .pts_time
+        .as_deref()
+        .and_then(|text| text.parse().ok())
+        .context("the keyframe has no timestamp")?;
+    // Packet times are absolute; the clip's timeline starts at the stream's
+    // start time.
+    let start: f64 = output
+        .streams
+        .first()
+        .and_then(|stream| stream.start_time.as_deref())
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(0.0);
+    let keyframe = Duration::from_secs_f64((pts - start).max(0.0));
+    // Never report a later point than asked for, whatever rounding did.
+    Ok(keyframe.min(at))
+}
+
 #[derive(Deserialize)]
 struct ProbeOutput {
     #[serde(default)]
@@ -185,6 +265,20 @@ mod tests {
         assert_eq!(info.frame_rate, Some(60.0));
         assert!(info.has_audio);
         assert_eq!(info.video_codec.as_deref(), Some("h264"));
+        Ok(())
+    }
+
+    #[test]
+    fn finds_the_keyframe_relative_to_the_stream_start() -> Result<()> {
+        let json = br#"{
+            "packets": [{"pts_time": "2.500000", "flags": "K__"}],
+            "streams": [{"start_time": "0.500000"}]
+        }"#;
+        let at = Duration::from_millis(3_300);
+        assert_eq!(parse_keyframe(json, at)?, Duration::from_secs(2));
+
+        let no_keyframe = br#"{"packets": [{"pts_time": "2.5", "flags": "___"}], "streams": []}"#;
+        assert!(parse_keyframe(no_keyframe, at).is_err());
         Ok(())
     }
 

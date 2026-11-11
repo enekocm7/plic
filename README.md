@@ -29,6 +29,11 @@ Without a folder argument, plic opens the current directory.
    `I` and `O` at the playhead, or by typing the times in the export panel.
 3. Name it, choose the destination folder, and press `Ctrl+Enter`.
 
+Turn on **Lossless** in the export panel to copy the video instead of
+re-encoding it: the export is near-instant and keeps the original quality,
+but the cut starts on the keyframe at or before the chosen start. The panel
+shows where it will really start.
+
 Exports run in the background, one at a time, while plic moves on to the
 next clip. Press `?` to see every shortcut.
 

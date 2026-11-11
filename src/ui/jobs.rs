@@ -99,6 +99,7 @@ impl PlicApp {
             source: entry.file.path.clone(),
             output,
             range: entry.trim,
+            mode: self.editor.mode,
             source_duration: info.duration,
         })
     }
