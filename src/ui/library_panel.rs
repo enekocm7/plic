@@ -1,0 +1,166 @@
+//! The clip list on the left of the window.
+
+use std::ops::Range;
+
+use gpui_kit::assets::IconName;
+use gpui_kit::component::scroll::Scrollbar;
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::*;
+
+use super::app::PlicApp;
+
+const PANEL_WIDTH: f32 = 280.;
+const ROW_HEIGHT: f32 = 64.;
+
+impl PlicApp {
+    pub(super) fn render_library(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let count = self.clips.len();
+        v_flex()
+            .w(px(PANEL_WIDTH))
+            .flex_none()
+            .h_full()
+            .bg(theme.sidebar)
+            .border_r_1()
+            .border_color(theme.sidebar_border)
+            .child(
+                h_flex()
+                    .h(px(40.))
+                    .px_3()
+                    .flex_none()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.muted_foreground)
+                            .child("CLIPS"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(count.to_string()),
+                    ),
+            )
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        uniform_list("clips", count, cx.processor(Self::render_clip_rows))
+                            .size_full()
+                            .track_scroll(&self.list_scroll),
+                    )
+                    .child(Scrollbar::vertical(&self.list_scroll)),
+            )
+    }
+
+    fn render_clip_rows(
+        &mut self,
+        range: Range<usize>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let theme = cx.theme().clone();
+        range
+            .filter_map(|index| {
+                let entry = self.clips.get(index)?;
+                let selected = self.selected == Some(index);
+                let row = h_flex()
+                    .id(("clip", index))
+                    .size_full()
+                    .px_2()
+                    .gap_3()
+                    .rounded(theme.radius)
+                    .cursor_pointer()
+                    .when(selected, |row| row.bg(theme.sidebar_accent))
+                    .when(!selected, |row| row.hover(|row| row.bg(theme.list_hover)))
+                    .on_click(cx.listener(move |this, _, _, cx| this.select(index, cx)))
+                    .child(
+                        div()
+                            .w(px(80.))
+                            .h(px(45.))
+                            .flex_none()
+                            .rounded(theme.radius)
+                            .bg(theme.muted)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                Icon::new(IconName::Film)
+                                    .small()
+                                    .text_color(theme.muted_foreground),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .truncate()
+                                    .when(selected, |text| {
+                                        text.text_color(theme.sidebar_accent_foreground)
+                                    })
+                                    .child(entry.file.file_name()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(format_size(entry.file.size)),
+                            ),
+                    );
+                // Padding outside the row keeps the highlight off the panel edges.
+                Some(
+                    div()
+                        .h(px(ROW_HEIGHT))
+                        .px_2()
+                        .py_0p5()
+                        .child(row)
+                        .into_any_element(),
+                )
+            })
+            .collect()
+    }
+}
+
+/// Human-readable file size such as `12.4 MB`.
+pub(super) fn format_size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    if value < 1024.0 {
+        return format!("{bytes} B");
+    }
+    let mut unit = "B";
+    for next in UNITS {
+        value /= 1024.0;
+        unit = next;
+        if value < 1024.0 {
+            break;
+        }
+    }
+    if value < 10.0 {
+        format!("{value:.1} {unit}")
+    } else {
+        format!("{value:.0} {unit}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_size;
+
+    #[test]
+    fn formats_sizes_with_sensible_precision() {
+        assert_eq!(format_size(512), "512 B");
+        assert_eq!(format_size(1536), "1.5 KB");
+        assert_eq!(format_size(25 * 1024 * 1024), "25 MB");
+        assert_eq!(format_size(3 * 1024 * 1024 * 1024 / 2), "1.5 GB");
+    }
+}
