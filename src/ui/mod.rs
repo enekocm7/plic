@@ -9,6 +9,7 @@ mod library_panel;
 mod player;
 mod shortcuts;
 mod timeline;
+mod volume;
 
 use std::path::PathBuf;
 

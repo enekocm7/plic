@@ -16,11 +16,10 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
-
 use super::{
     frame_image,
     timeline::{self, Drag, TimelineState},
+    volume,
 };
 use crate::{
     audio::AudioOutput,
@@ -119,27 +118,13 @@ pub struct Player {
     audio: AudioDevice,
     volume: f32,
     muted: bool,
-    volume_slider: Entity<SliderState>,
+    /// Whether the volume slider is being dragged.
+    pub(super) dragging_volume: bool,
 }
 
 impl Player {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(_: &mut Context<Self>) -> Self {
         let volume = 0.8;
-        let volume_slider = cx.new(|_| {
-            SliderState::new()
-                .min(0.)
-                .max(1.)
-                .step(0.01)
-                .default_value(volume)
-        });
-        cx.subscribe(&volume_slider, |this, _, event: &SliderEvent, cx| {
-            let (SliderEvent::Change(value) | SliderEvent::Release(value)) = event;
-            this.volume = value.end();
-            this.muted = false;
-            this.apply_volume();
-            cx.notify();
-        })
-        .detach();
         Self {
             source: None,
             generation: 0,
@@ -162,7 +147,7 @@ impl Player {
             audio: AudioDevice::Unopened,
             volume,
             muted: false,
-            volume_slider,
+            dragging_volume: false,
         }
     }
 
@@ -356,6 +341,18 @@ impl Player {
 
     pub fn toggle_mute(&mut self, cx: &mut Context<Self>) {
         self.muted = !self.muted;
+        self.apply_volume();
+        cx.notify();
+    }
+
+    pub fn volume(&self) -> f32 {
+        self.volume
+    }
+
+    /// Sets the volume, unmuting if it is turned up.
+    pub fn set_volume(&mut self, level: f32, cx: &mut Context<Self>) {
+        self.volume = level.clamp(0.0, 1.0);
+        self.muted = false;
         self.apply_volume();
         cx.notify();
     }
@@ -846,7 +843,7 @@ impl Player {
                     .tooltip(tooltip)
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_mute(cx))),
             )
-            .child(div().w(px(96.)).child(Slider::new(&self.volume_slider)))
+            .child(volume::render(self.volume, self.muted, cx))
     }
 }
 
