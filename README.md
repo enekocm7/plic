@@ -1,149 +1,157 @@
+<div align="center">
+
+<img src="assets/plic.png" alt="plic" width="96">
+
 # plic
 
-Watch, trim and file away video clips.
+**Watch, trim and file away video clips.**
 
-plic opens a folder of recordings, plays them back with sound, and lets
-you cut each one down and save it into a subfolder or beside the originals. Once a clip is
-exported, its original moves to `edited/`, so the list only holds what is
-still to be done.
+Open a folder of recordings, cut each one down, export it, and move on.
+Finished originals step aside, so the list only shows what's left to do.
 
-Built with [GPUI](https://www.gpui.rs) through gpui-kit and its
-`gpui-fast` backend.
+[Download](https://github.com/enekocm7/plic/releases/latest) ·
+[Install](#install) ·
+[How it works](#how-it-works) ·
+[Settings](#settings)
 
-## Requirements
+</div>
 
-plic decodes the preview and encodes the exports with `ffmpeg` and
-`ffprobe`, and looks after them itself. On Windows, the first run downloads
-a known build (ffmpeg 9.0.2, Gyan Doshi's essentials build) into
-`%LOCALAPPDATA%\plic\ffmpeg`, checks it against a pinned SHA-256 and uses
-it from then on; a banner shows the progress and offers a retry if the
-download fails. Nothing has to be put on `PATH`. To use your own build, set
-**ffmpeg folder** in the settings to the folder holding `ffmpeg` and
-`ffprobe`. On other systems, and until the download has finished, plic uses
-the ones on `PATH`.
+---
 
-Exports are H.264, HEVC or AV1 at a Small, Balanced
-or High quality preset. Each codec uses the first hardware encoder that
-works (AMF, NVENC or Quick Sync) and falls back to `libx264`, `libx265`
-or `libsvtav1`/`libaom-av1`.
+## Highlights
+
+- **Fast triage.** Play clips with sound, trim with handles or `I`/`O`, and
+  export with `Ctrl+Enter`. Originals move to `edited/` once exported.
+- **Multiple segments.** Keep several parts of one recording, or split it
+  with `S`. Join the parts into one file or save them separately.
+- **Batch actions.** Select many clips and export, move or delete them together.
+- **Export your way.** H.264, HEVC or AV1, plus GIF and WebP. Crop, rotate,
+  flip, downscale, cap the frame rate, or target a file size (10-100 MB).
+- **Audio control.** Choose tracks, mix game and mic, adjust gain, normalize loudness.
+- **Lossless cuts.** Copy the video without re-encoding for near-instant exports.
+- **Background queue.** Keep working while exports run.
+- **Safe to quit.** Trims and names are saved as drafts and restored next time.
+- **Self-updating.** One click installs new versions.
 
 ## Install
 
-Download `plic-<version>-setup.exe` from the
+**Windows:** download `plic-<version>-setup.exe` from the
 [latest release](https://github.com/enekocm7/plic/releases/latest), or use a
 package manager:
 
 ```sh
 winget install enekocm7.plic
+```
+
+```sh
 scoop bucket add plic https://github.com/enekocm7/plic
 scoop install plic/plic
 ```
 
-The installer (and the Scoop package) add **Open with plic** to the Explorer
-menu of folders, of the empty space inside a folder, and of `.mp4`, `.mov`,
-`.mkv`, `.webm` and `.m4v` files; opening a video opens its folder with that
-clip selected. The installer lets you leave this out, and uninstalling
-removes it. A portable `.zip` is on every release too.
+The installer can add **Open with plic** to the Explorer menu for folders and
+`.mp4`, `.mov`, `.mkv`, `.webm` and `.m4v` files. A portable `.zip` is on every
+release too.
 
-## Usage
+plic needs `ffmpeg`, and on Windows it fetches a verified build on first run,
+so there's nothing to set up. See [ffmpeg](#ffmpeg) for details.
+
+## How it works
 
 ```sh
 plic [FOLDER]
 ```
 
-Without a folder argument, plic reopens the folder from last time, or the
-current directory the first time. The arrow next to **Open folder** lists
-recent folders. The window size and position, volume and theme are
-remembered too, in `state.json` next to `settings.json`.
+With no folder, plic reopens the last one. You can also drop a folder or a
+video onto the window.
 
-Unfinished work survives a restart: each clip's segments, export name and
-destination are kept in `drafts.json` in plic's data folder (`%APPDATA%\plic`
-on Windows), never next to the recordings, and are dropped once the clip
-has been exported. A recording replaced by a different file starts fresh.
+1. **Pick** a clip on the left.
+2. **Trim** it: drag the yellow handles, press `I` / `O` at the playhead, or type times.
+3. **Export**: name it, choose a destination, press `Ctrl+Enter`.
 
-You can also drop a folder onto the window to open it, or a video file to open
-its folder with that clip selected. Dropped files are never moved.
+Press `?` at any time to see every shortcut.
 
-1. Pick a clip on the left. It starts in the viewer.
-2. Trim it by dragging the yellow handles on the timeline, by pressing
-   `I` and `O` at the playhead, or by typing the times in the export panel.
-3. Name it, choose the destination folder, and press `Ctrl+Enter`.
+### Trimming
 
-Ctrl-click clips to pick several, Shift-click to pick a run of them, or
-press `Ctrl+A` for every clip the list shows. A bar over the list then
-exports them all (`Ctrl+Enter`) with the export panel's format and the
-selected clip's destination, naming each with the name template or its own
-name; moves them into another folder; or deletes them (`Delete`). `Escape`
-goes back to a single clip.
+| Key | Action |
+| --- | --- |
+| `Space` | Play / pause |
+| `I` / `O` | Set trim start / end at the playhead |
+| `N` | Add another segment |
+| `S` | Split the segment at the playhead |
+| `J` `K` `L` | Shuttle backward / stop / forward (press again to go faster) |
+| `=` `-` `0` | Zoom the timeline in / out / to fit |
+| `Ctrl+Z` / `Ctrl+Y` | Undo / redo trims, moves and deletes |
+| `Ctrl+Shift+S` | Save the current frame as PNG (`Ctrl+Alt+S` for JPEG) |
+| `Ctrl+Shift+C` | Copy the latest export to the clipboard |
 
-To keep several parts of one recording, press `N` (or **Add segment at the
-playhead**) to start another segment, and trim it like the first. Click a
-segment on the timeline or in the export panel to edit it. Press `S` to
-split the segment under the playhead in two, which cuts a long recording
-into parts in a single pass. Segments are
-joined in order into one file, or, with **Join into one file** off, saved
-as `name-1`, `name-2`, … or under a name given to each part The original is only moved to `edited/` once every
-part has exported.
+Zoom with the mouse wheel for frame-accurate cuts. Hovering the timeline
+previews the frame, and the audio waveform makes a shout or a shot easy to find.
 
-Under **Frame**, crop the export to 16:9, 9:16, 1:1 or 4:5 (the viewer
-shows what is kept, and a slider moves the crop), rotate it in quarter
-turns, or flip it. These always re-encode.
+### Exporting
 
-Under **Audio**, pick which audio tracks to keep. Recordings with separate
-game and microphone tracks are mixed into one; untick everything to drop
-the sound. A gain slider and **Normalize loudness** (to -14 LUFS) change the
-exported level without touching the viewer's volume.
+- **Format:** H.264, HEVC or AV1 at Small, Balanced or High quality. Hardware
+  encoders (AMF, NVENC, Quick Sync) are used when available, with software fallbacks.
+- **Frame:** crop to 16:9, 9:16, 1:1 or 4:5, rotate, or flip.
+- **Size:** cap at 1080p, 720p or 480p and 60 or 30 fps. plic never upscales.
+- **File size:** pick 10, 25, 50 or 100 MB and plic encodes in two passes to land just under it.
+- **GIF / WebP:** short silent loops, with an estimated size.
+- **Lossless:** copies the video as is. The cut snaps to the keyframe at or before your start, and the panel shows where.
+- **Queue:** exports run in the background; the "At once" buttons set how many run together.
 
-Cap the **Size** at 1080p, 720p or 480p (by the shorter side, so vertical
-video works too) and the **Rate** at 60 or 30 fps; plic never upscales or
-adds frames. Pick a **File** size (10, 25, 50 or 100 MB) to fit an upload limit: plic works
-out the bitrate from the export's length and encodes in two passes with
-the codec's software encoder, which lands just under the size.
+### Batch
 
-Switch the format to **GIF** or **WebP** for short, silent loops: pick a
-width and frame rate, and the panel estimates the size. GIFs get a
-palette made from the clip itself.
+`Ctrl`-click or `Shift`-click to select several clips, or press `Ctrl+A`.
+A bar appears to export, move or delete them all. `Escape` goes back to a single clip.
 
-Turn on **Lossless** in the export panel to copy the video instead of
-re-encoding it: the export is near-instant and keeps the original quality,
-but the cut starts on the keyframe at or before the chosen start. The panel
-shows where it will really start.
+### Undo and recovery
 
-Press `Ctrl+Shift+S` (or the camera button above the viewer) to save the
-frame under the playhead as a full-resolution PNG, or `Ctrl+Alt+S` for a
-JPEG. It lands in the clip's destination folder as `name-01m12s345.png`.
+Deleted clips go to the Recycle Bin. Drafts (segments, names, destinations)
+are kept in `drafts.json` in plic's data folder, never next to your recordings,
+and are dropped once a clip is exported.
 
-`Ctrl+Z` undoes the last trim change (a whole drag counts as one), delete
-or move of an original into `edited/`; `Ctrl+Y` or `Ctrl+Shift+Z` redoes
-it. Deleted clips come back out of the Recycle Bin. The arrows in the title
-bar do the same and say what they will undo.
+## Settings
 
-Finished exports stay listed under the queue: copy one to the clipboard
-as a file (paste it straight into Discord or Explorer) or show it in its
-folder. `Ctrl+Shift+C` copies the latest one.
+Press `Ctrl+,` or click the gear. You can change the seek step, the folder
+originals move to (`edited` by default), and the default destination.
+They're stored in `settings.json` under `%APPDATA%\plic`.
 
-Zoom the timeline with the mouse wheel (around the pointer) or `=` and `-`
-(around the playhead) to trim long recordings precisely; `0` shows the
-whole clip again. Shift with the wheel scrolls along it, the view follows
-the playhead, and once frames are far enough apart each one gets a tick.
-The speed button next to the loop toggle plays at 0.5x, 1x, 1.5x or 2x;
-the sound keeps its pitch. `J`, `K` and `L` work as a shuttle: `L` plays
-forward and each further press goes faster, `J` plays backward the same
-way, and `K` stops. The arrow keys still jump by the seek step.
+**Name template** pre-fills export names, for example `{folder}-{date}-{n}`:
 
-Hovering the timeline shows a small preview of the frame under the
-pointer. Filmstrips of the last few clips are kept, so flipping back to
-one is instant.
+| Token | Meaning |
+| --- | --- |
+| `{name}` | The clip's own name |
+| `{folder}` | The clips folder |
+| `{date}` | The day it was recorded |
+| `{n}` | A counter that skips names already in the destination |
 
-The timeline shows the clip's audio waveform (every track mixed) along the
-bottom of the filmstrip, so a shout or a shot is easy to find by sound.
+**Key bindings** can be changed in the same dialog. In `settings.json` only
+your changes are stored, and an empty list unbinds a command:
 
-Exports run in the background while plic moves on to the next clip. The
-queue's "At once" buttons set how many may encode together (two by
-default); hardware encoders are held to two sessions and software encoders
-to one per four CPU cores, and lossless copies always run alongside. Press `?` to see every shortcut.
+```json
+"key_bindings": {
+  "toggle_play": ["space", "p"],
+  "delete_clip": []
+}
+```
+
+### ffmpeg
+
+On Windows, plic downloads ffmpeg 9.0.2 (Gyan Doshi's essentials build) into
+`%LOCALAPPDATA%\plic\ffmpeg` on first run and checks it against a pinned
+SHA-256. To use your own, set **ffmpeg folder** in the settings to a folder
+containing `ffmpeg` and `ffprobe`. On other systems, plic uses what's on `PATH`.
+
+## Updates
+
+plic checks for a new release on start, at most every six hours. Click
+**Install update** in the banner: it downloads the installer, verifies its
+checksum, installs, and restarts. Portable copies open the release page
+instead. Dismiss a version to hide it until a newer one appears; the download
+button in the title bar checks manually.
 
 ## Development
+
+Built with Rust and [GPUI](https://www.gpui.rs) via gpui-kit.
 
 ```sh
 cargo test
@@ -154,70 +162,28 @@ mise run run    # release build, copied into ./clips
 CI runs `cargo fmt --check`, `cargo clippy`, `cargo build` and `cargo test`
 on Windows for every push to `master` and every pull request.
 
-## Releases
+### Releasing
 
-Releases are built by GitHub Actions from version tags. `Cargo.toml` is the
-single source of the version; the release fails if the tag does not match it.
+`Cargo.toml` holds the version, and the release fails if the tag doesn't match.
 
 1. Bump `version` in `Cargo.toml` and run `cargo build` to update `Cargo.lock`.
-2. Commit, then tag and push: `git tag v0.9.0 && git push origin master v0.9.0`.
+2. Commit, then `git tag v0.9.0 && git push origin master v0.9.0`.
 
-The workflow publishes a GitHub release with an installer
-(`plic-<version>-setup.exe`), a portable `.zip`, the package manager
-manifests and `SHA256SUMS.txt`. The manifests are filled in from the
-templates in `packaging/` by `packaging/render-manifests.ps1`. Then:
+GitHub Actions publishes the installer, the portable `.zip`, package manifests
+(rendered from `packaging/` by `render-manifests.ps1`) and `SHA256SUMS.txt`. It
+then updates the Scoop bucket and, if a `WINGET_TOKEN` secret (classic token,
+`public_repo` scope) is set, opens a winget-pkgs pull request. Without the
+token, submit the attached manifests by hand.
 
-- **Scoop**: `bucket/plic.json` on `master` is updated to the new release,
-  so `scoop update` picks it up.
-- **winget**: with a `WINGET_TOKEN` secret (a classic GitHub token with the
-  `public_repo` scope), `wingetcreate` opens a pull request on
-  `microsoft/winget-pkgs`. Without it, submit the manifests attached to the
-  release by hand.
-
-plic checks for a newer release when it starts, at most once every six
-hours, and shows a banner. "Install update" downloads the installer, checks
-it against `SHA256SUMS.txt`, runs it silently and restarts plic on the new
-version. A portable copy opens the release page instead. Dismissing a version
-hides it until an even newer one is published; the download button in the
-title bar checks again by hand.
-
-To build the installer locally, install [Inno Setup](https://jrsoftware.org/isinfo.php)
-and run:
+To build the installer locally, install [Inno Setup](https://jrsoftware.org/isinfo.php) and run:
 
 ```sh
 cargo build --release
-iscc /DAppVersion=0.8.1 installer\plic.iss
+iscc /DAppVersion=0.8.2 installer\plic.iss
 ```
 
-The installer lands in `target/dist/`.
-
-## Settings
-
-Press `Ctrl+,` (or the gear in the title bar) to change the seek step, the
-name of the folder originals move to after export (`edited` by default) and
-the default destination folder. They are saved as `settings.json` in the
-`plic` folder of your OS config directory (`%APPDATA%` on Windows) and can
-also be edited there by hand.
-
-A **name template** in the settings pre-fills export names, e.g.
-`{folder}-{date}-{n}`. `{name}` is the clip's own name, `{folder}` the clips
-folder, `{date}` the day it was recorded, and `{n}` counts up past names that
-already exist in the destination.
-
-Every keyboard shortcut can be changed under **Key bindings** in the same
-dialog. In `settings.json` only the changed ones are stored, by command name,
-each with a list of keys; an empty list unbinds a command:
-
-```json
-"key_bindings": {
-  "toggle_play": ["space", "p"],
-  "delete_clip": []
-}
-```
-
-The shortcuts reference (`?`) always shows the keys in effect.
+The result lands in `target/dist/`.
 
 ## License
 
-plic is free software under the GNU General Public License, version 3 —
-see [LICENSE](LICENSE).
+[GPL-3.0](LICENSE)
