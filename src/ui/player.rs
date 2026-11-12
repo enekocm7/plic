@@ -174,7 +174,7 @@ pub struct Player {
 
 impl Player {
     pub fn new(_: &mut Context<Self>) -> Self {
-        let volume = 0.8;
+        let volume = crate::state::get().volume.clamp(0., 1.);
         Self {
             source: None,
             generation: 0,
@@ -459,6 +459,7 @@ impl Player {
     /// Sets the volume, unmuting if it is turned up.
     pub fn set_volume(&mut self, level: f32, cx: &mut Context<Self>) {
         self.volume = level.clamp(0.0, 1.0);
+        crate::state::update(|state| state.volume = self.volume);
         self.muted = false;
         self.apply_volume();
         cx.notify();

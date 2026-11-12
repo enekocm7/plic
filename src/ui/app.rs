@@ -8,7 +8,8 @@ use std::{
 };
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonVariants as _, DropdownButton};
+use gpui_kit::component::menu::PopupMenuItem;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, Sizable as _, Theme, ThemeMode, TitleBar, h_flex, v_flex,
 };
@@ -175,6 +176,8 @@ impl PlicApp {
             move |window, cx| focus.focus(window, cx)
         });
         let player = cx.new(Player::new);
+        cx.observe_window_bounds(window, |_, window, _| super::record_bounds(window))
+            .detach();
         cx.subscribe_in(&player, window, Self::on_player_event)
             .detach();
         let mut app = Self {
@@ -239,6 +242,8 @@ impl PlicApp {
         if self.folder.as_ref() != Some(&folder) {
             self.last_folder = None;
         }
+        crate::state::update(|state| state.remember_folder(&folder));
+        crate::state::save();
         self.watch_folder(&folder, window, cx);
         self.folder = Some(folder);
         self.sync_folder_choices(window, cx);
@@ -891,6 +896,7 @@ impl PlicApp {
         } else {
             ThemeMode::Dark
         };
+        crate::state::update(|state| state.dark_theme = mode == ThemeMode::Dark);
         Theme::change(mode, Some(window), cx);
     }
 
@@ -976,17 +982,45 @@ impl PlicApp {
                         // this, Windows treats clicks on these buttons as the
                         // start of a window move and they never fire.
                         .occlude()
-                        .child(
-                            Button::new("open-folder")
+                        .child({
+                            let app = cx.entity().downgrade();
+                            let current = self.folder.clone();
+                            DropdownButton::new("open-folder")
                                 .ghost()
                                 .small()
-                                .icon(IconName::FolderOpen)
-                                .label("Open folder")
-                                .tooltip("Open a clips folder (Ctrl+O)")
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.open_folder(&OpenFolder, window, cx)
-                                })),
-                        )
+                                .button(
+                                    Button::new("open-folder-button")
+                                        .icon(IconName::FolderOpen)
+                                        .label("Open folder")
+                                        .tooltip("Open a clips folder (Ctrl+O)")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.open_folder(&OpenFolder, window, cx)
+                                        })),
+                                )
+                                .dropdown_menu(move |menu, _, _| {
+                                    let recent: Vec<PathBuf> = crate::state::get()
+                                        .recent_folders
+                                        .into_iter()
+                                        .filter(|folder| Some(folder) != current.as_ref())
+                                        .collect();
+                                    if recent.is_empty() {
+                                        return menu.label("No recent folders");
+                                    }
+                                    recent.into_iter().fold(menu, |menu, folder| {
+                                        let app = app.clone();
+                                        let label = folder.display().to_string();
+                                        menu.item(PopupMenuItem::new(label).on_click(
+                                            move |_, window, cx| {
+                                                let folder = folder.clone();
+                                                app.update(cx, |app, cx| {
+                                                    app.load_folder(folder, window, cx)
+                                                })
+                                                .ok();
+                                            },
+                                        ))
+                                    })
+                                })
+                        })
                         .child(
                             Button::new("reload")
                                 .ghost()
