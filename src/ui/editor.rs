@@ -4,7 +4,11 @@
 //! The text fields and the timeline edit the same range. Typing a valid
 //! time moves the handles; dragging a handle rewrites the text.
 
-use std::path::Path;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -12,6 +16,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectState};
+use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Sizable as _, WindowExt as _, h_flex, v_flex,
@@ -21,12 +26,31 @@ use gpui_kit::*;
 
 use super::app::{ClipEntry, ClipStatus, PlicApp, display_name};
 use super::library_panel::format_size;
-use crate::{ffmpeg, library, timestamp, trim::TrimRange};
+use crate::{
+    ffmpeg::{self, ExportMode},
+    library, timestamp,
+    trim::TrimRange,
+};
 
 pub const PANEL_WIDTH: f32 = 320.;
 
 /// Destination folder names, filtered as the user types.
 type FolderList = SearchableVec<SharedString>;
+
+/// Keyframe lookups kept before the cache is cleared; dragging a handle
+/// asks for a new one every few frames.
+const KEYFRAME_CACHE_LIMIT: usize = 256;
+
+/// How far a lossless start may move before the panel points it out; less
+/// than a frame is just rounding.
+const MOVE_NOTICE: Duration = Duration::from_millis(5);
+
+/// Where a lossless cut that is asked to start at some point really starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Keyframe {
+    Found(Duration),
+    Failed(SharedString),
+}
 
 /// Which time field an edit came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +70,13 @@ pub struct Editor {
     time_error: Option<SharedString>,
     /// Why the last export attempt was refused, shown under the button.
     pub(super) export_error: Option<SharedString>,
+    /// How exports are written. Kept while moving between clips.
+    pub(super) mode: ExportMode,
+    /// Keyframe at or before a clip's start, by clip and requested start.
+    keyframes: HashMap<(PathBuf, Duration), Keyframe>,
+    /// Whether a keyframe lookup is running. Only one runs at a time; the
+    /// next render asks for whatever the start is by then.
+    keyframe_pending: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -83,6 +114,9 @@ impl Editor {
             folder,
             time_error: None,
             export_error: None,
+            mode: ExportMode::default(),
+            keyframes: HashMap::new(),
+            keyframe_pending: false,
             _subscriptions: subscriptions,
         }
     }
@@ -389,7 +423,70 @@ impl PlicApp {
         true
     }
 
+    /// The keyframe a lossless cut of `path` starting at `start` begins on,
+    /// looking it up in the background the first time it is asked for.
+    /// `None` while that lookup runs.
+    fn keyframe_for(
+        &mut self,
+        path: &Path,
+        start: Duration,
+        cx: &mut Context<Self>,
+    ) -> Option<Keyframe> {
+        if start.is_zero() {
+            return Some(Keyframe::Found(Duration::ZERO));
+        }
+        let key = (path.to_path_buf(), start);
+        if let Some(found) = self.editor.keyframes.get(&key) {
+            return Some(found.clone());
+        }
+        if self.editor.keyframe_pending {
+            return None;
+        }
+        self.editor.keyframe_pending = true;
+        let lookup = cx.background_spawn({
+            let path = key.0.clone();
+            async move { ffmpeg::keyframe_at_or_before(&path, start) }
+        });
+        cx.spawn(async move |this, cx| {
+            let found = match lookup.await {
+                Ok(keyframe) => Keyframe::Found(keyframe),
+                Err(error) => Keyframe::Failed(format!("{error:#}").into()),
+            };
+            this.update(cx, |this, cx| {
+                let keyframes = &mut this.editor.keyframes;
+                if keyframes.len() >= KEYFRAME_CACHE_LIMIT {
+                    keyframes.clear();
+                }
+                keyframes.insert(key, found);
+                this.editor.keyframe_pending = false;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        None
+    }
+
+    fn set_mode(&mut self, lossless: bool, cx: &mut Context<Self>) {
+        self.editor.mode = if lossless {
+            ExportMode::StreamCopy
+        } else {
+            ExportMode::Reencode
+        };
+        self.editor.export_error = None;
+        cx.notify();
+    }
+
     pub(super) fn render_export_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let lossless = self.editor.mode == ExportMode::StreamCopy;
+        // Resolved before `entry` borrows `self` for the rest of the render.
+        let keyframe = match self.current() {
+            Some(entry) if lossless && entry.info().is_some() => {
+                let (path, start) = (entry.file.path.clone(), entry.trim.start);
+                Some(self.keyframe_for(&path, start, cx))
+            }
+            _ => None,
+        };
         let theme = cx.theme().clone();
         let entry = self.current();
         let enabled = entry.is_some_and(|entry| entry.info().is_some());
@@ -438,7 +535,12 @@ impl PlicApp {
                 )
         };
 
-        let length = trim.length(duration);
+        // A lossless cut starts on the keyframe, so it runs a little longer.
+        let effective_start = match &keyframe {
+            Some(Some(Keyframe::Found(start))) => *start,
+            _ => trim.start,
+        };
+        let length = TrimRange::new(effective_start, trim.end).length(duration);
         let estimate = entry
             .zip(duration)
             .zip(length)
@@ -486,6 +588,57 @@ impl PlicApp {
                         }),
                 )
             });
+
+        let snapped = keyframe.map(|keyframe| {
+            let note = |color: Hsla, text: String| div().text_xs().text_color(color).child(text);
+            match keyframe {
+                None => note(
+                    theme.muted_foreground,
+                    "Finding the keyframe the cut starts on…".into(),
+                ),
+                Some(Keyframe::Found(start)) if trim.start.saturating_sub(start) >= MOVE_NOTICE => {
+                    note(
+                        theme.warning,
+                        format!(
+                            "Starts at {}, the keyframe {} earlier. The end stays as set.",
+                            timestamp::format_precise(start),
+                            timestamp::format_precise(trim.start - start),
+                        ),
+                    )
+                }
+                Some(Keyframe::Found(_)) => note(
+                    theme.muted_foreground,
+                    "Starts on a keyframe, exactly as set.".into(),
+                ),
+                Some(Keyframe::Failed(error)) => note(theme.danger, error.to_string()),
+            }
+        });
+
+        let mode_row = h_flex()
+            .gap_2()
+            .child(
+                v_flex()
+                    .flex_1()
+                    .child(div().text_sm().child("Lossless"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("Instant copy, cut on a keyframe"),
+                    ),
+            )
+            .child(
+                Switch::new("lossless")
+                    .checked(lossless)
+                    .disabled(!enabled)
+                    .tooltip(
+                        "Copy the video without re-encoding: instant and with no quality loss, \
+                         but the start moves back to the nearest keyframe",
+                    )
+                    .on_click(
+                        cx.listener(|this, checked: &bool, _, cx| this.set_mode(*checked, cx)),
+                    ),
+            );
 
         let output_preview = match (&destination, output_name.is_empty()) {
             (Some(folder), false) => Some(format!(
@@ -567,6 +720,7 @@ impl PlicApp {
                                 }),
                         )
                         .child(summary)
+                        .child(v_flex().gap_1p5().child(mode_row).children(snapped))
                         .child(
                             v_flex()
                                 .gap_1p5()

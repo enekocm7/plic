@@ -10,10 +10,10 @@ mod probe;
 use std::{process::Command, time::Duration};
 
 pub use export::{
-    CancelToken, ExportError, ExportRequest, estimated_size, export, warm_up_encoder,
+    CancelToken, ExportError, ExportMode, ExportRequest, estimated_size, export, warm_up_encoder,
 };
 pub use frames::{FrameSize, RawFrame, VideoStream, extract_frame, extract_keyframe};
-pub use probe::{MediaInfo, probe};
+pub use probe::{MediaInfo, keyframe_at_or_before, probe};
 
 pub trait CommandExt {
     /// Keeps the child from opening a console window. Release builds are GUI

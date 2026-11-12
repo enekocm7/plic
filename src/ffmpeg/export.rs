@@ -1,4 +1,5 @@
-//! Re-encoding a trimmed range of a clip with ffmpeg.
+//! Exporting a trimmed range of a clip with ffmpeg, either re-encoded for a
+//! frame-accurate cut or stream-copied for a fast, lossless one.
 //!
 //! Output is written to a hidden temporary file next to the destination and
 //! only published once ffmpeg succeeds, so a crash or cancellation never
@@ -95,21 +96,26 @@ pub fn warm_up_encoder() {
     thread::spawn(encoder);
 }
 
+/// How the trimmed range is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExportMode {
+    /// Decode and encode again: cuts land on the exact frame.
+    #[default]
+    Reencode,
+    /// Copy the compressed streams: near-instant and lossless, but the start
+    /// moves back to the keyframe at or before the requested one.
+    StreamCopy,
+}
+
 /// Everything needed to produce one trimmed output file.
 #[derive(Debug, Clone)]
 pub struct ExportRequest {
     pub source: PathBuf,
     pub output: PathBuf,
     pub range: TrimRange,
+    pub mode: ExportMode,
     /// Length of the source, used to report progress for open-ended ranges.
     pub source_duration: Option<Duration>,
-}
-
-impl ExportRequest {
-    /// Length of the produced video, when it can be known up front.
-    fn expected_length(&self) -> Option<Duration> {
-        self.range.length(self.source_duration)
-    }
 }
 
 /// Lets the UI cancel a running export.
@@ -170,29 +176,35 @@ pub fn export(
     if output.exists() {
         return Err(anyhow::anyhow!("{} already exists", output.display()).into());
     }
+    let range = effective_range(request)?;
     let temporary = create_temp_path(output)?;
     // Removes the temporary file on every early return below.
     let guard = TempFile(&temporary);
 
     let mut command = Command::new("ffmpeg");
     command.args(["-hide_banner", "-loglevel", "error", "-nostats", "-y"]);
-    if !request.range.start.is_zero() {
-        command.arg("-ss").arg(seconds_arg(request.range.start));
+    if !range.start.is_zero() {
+        command.arg("-ss").arg(seconds_arg(range.start));
     }
-    command
-        .args(["-hwaccel", "auto"])
-        .arg("-i")
-        .arg(&request.source);
-    if let Some(length) = request
-        .range
-        .end
-        .map(|end| end.saturating_sub(request.range.start))
-    {
+    if request.mode == ExportMode::Reencode {
+        command.args(["-hwaccel", "auto"]);
+    }
+    command.arg("-i").arg(&request.source);
+    if let Some(length) = range.end.map(|end| end.saturating_sub(range.start)) {
         command.arg("-t").arg(seconds_arg(length));
     }
+    match request.mode {
+        ExportMode::Reencode => {
+            command
+                .args(encoder().args)
+                .args(["-c:a", "aac", "-b:a", "192k"]);
+        }
+        ExportMode::StreamCopy => {
+            command.args(["-c", "copy"]);
+        }
+    }
     command
-        .args(encoder().args)
-        .args(["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"])
+        .args(["-movflags", "+faststart"])
         .args(["-progress", "pipe:1"])
         .arg(&temporary)
         .no_window()
@@ -205,7 +217,7 @@ pub fn export(
         .context("could not start ffmpeg; check that it is installed and on PATH")?;
     let stderr = drain_in_background(child.stderr.take());
 
-    let expected = request.expected_length();
+    let expected = range.length(request.source_duration);
     if let Some(stdout) = child.stdout.take() {
         for line in BufReader::new(stdout).lines() {
             if cancel.is_cancelled() {
@@ -238,6 +250,21 @@ pub fn export(
     // The published file is a hard link or a copy; the temporary goes either way.
     drop(guard);
     Ok(output.clone())
+}
+
+/// The range that will actually be written. A stream copy can only start on
+/// a keyframe, so its start is moved back to the one at or before the
+/// requested start; starting there explicitly keeps every player in
+/// agreement about where the clip begins.
+fn effective_range(request: &ExportRequest) -> Result<TrimRange> {
+    match request.mode {
+        ExportMode::Reencode => Ok(request.range),
+        ExportMode::StreamCopy => {
+            let start = super::keyframe_at_or_before(&request.source, request.range.start)
+                .context("could not find a keyframe to start the lossless cut on")?;
+            Ok(TrimRange::new(start, request.range.end))
+        }
+    }
 }
 
 /// Reads `out_time_us=…` lines from ffmpeg's `-progress` output.
