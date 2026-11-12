@@ -79,7 +79,8 @@ actions!(
 );
 
 /// Opens the main window and runs until it closes.
-pub fn run(folder: Option<PathBuf>) {
+/// `clip`, if given, is selected once `folder` is open.
+pub fn run(folder: Option<PathBuf>, clip: Option<PathBuf>) {
     gpui_kit::application()
         .with_assets(gpui_kit::assets::AllAssets)
         .run(move |cx| {
@@ -120,7 +121,7 @@ pub fn run(folder: Option<PathBuf>) {
             };
             gpui_kit::open_window(options, cx, move |window, cx| {
                 window.set_window_title("plic");
-                cx.new(|cx| PlicApp::new(folder, window, cx))
+                cx.new(|cx| PlicApp::new(folder, clip, window, cx))
             })
             .expect("failed to open the main window");
             cx.activate(true);

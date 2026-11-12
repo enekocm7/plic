@@ -223,7 +223,12 @@ pub struct PlicApp {
 }
 
 impl PlicApp {
-    pub fn new(folder: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        folder: Option<PathBuf>,
+        clip: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus = cx.focus_handle();
         // Deferred so that setting up the editor's widgets cannot take it.
         window.defer(cx, {
@@ -273,6 +278,9 @@ impl PlicApp {
         app.set_up_ffmpeg(window, cx);
         if let Some(folder) = folder {
             app.load_folder(folder, window, cx);
+        }
+        if let Some(index) = clip.and_then(|clip| app.index_of(&clip)) {
+            app.select(index, window, cx);
         }
         // A development build is not a release, so it does not ask GitHub on
         // every `mise run dev`.

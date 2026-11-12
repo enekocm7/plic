@@ -3,6 +3,8 @@ name = "plic"
 version = "0.8.0"
 edition = "2024"
 description = "Watch, trim and file away video clips"
+license = "GPL-3.0-only"
+repository = "https://github.com/enekocm7/plic"
 
 [dependencies]
 anyhow = "1.0.104"
