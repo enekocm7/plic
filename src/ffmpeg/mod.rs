@@ -10,6 +10,7 @@ mod frames;
 mod graph;
 mod probe;
 mod transform;
+mod waveform;
 
 use std::{process::Command, time::Duration};
 
@@ -25,6 +26,7 @@ pub use frames::{
 pub use graph::{AudioAdjust, TARGET_LOUDNESS};
 pub use probe::{MediaInfo, keyframe_at_or_before, probe};
 pub use transform::{CropAspect, CropRect, OutputLimits, Transform};
+pub use waveform::{peaks as audio_peaks, resample as resample_peaks};
 
 pub trait CommandExt {
     /// Keeps the child from opening a console window. Release builds are GUI

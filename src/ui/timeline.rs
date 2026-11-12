@@ -1,5 +1,5 @@
-//! The timeline under the video: a filmstrip with the trim range and the
-//! playhead drawn over it.
+//! The timeline under the video: a filmstrip with the audio waveform along
+//! its bottom, and the trim range and the playhead drawn over it.
 //!
 //! Press anywhere to move the playhead and drag to scrub; drag the handles
 //! at either end of the highlighted range to trim. A clip can have several
@@ -12,7 +12,10 @@ use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
 
 use super::player::Player;
-use crate::trim::{Segments, TrimRange};
+use crate::{
+    ffmpeg,
+    trim::{Segments, TrimRange},
+};
 
 const STRIP_HEIGHT: f32 = 44.;
 /// Room above the strip for the playhead knob.
@@ -23,6 +26,10 @@ const INSET: f32 = 16.;
 const RADIUS: f32 = 6.;
 const HANDLE_WIDTH: f32 = 10.;
 const FRAME_BORDER: f32 = 2.;
+/// Height of the waveform band along the bottom of the strip.
+const WAVEFORM_HEIGHT: f32 = 20.;
+/// One waveform bar per this many pixels.
+const WAVEFORM_STEP: f32 = 2.;
 /// Extra room around a handle tab that still grabs it.
 const GRAB_SLACK: f32 = 3.;
 
@@ -41,6 +48,8 @@ pub struct TimelineState {
     /// `None` hides the segments, for clips that are only viewed.
     pub segments: Option<Segments>,
     pub filmstrip: Vec<Option<Arc<RenderImage>>>,
+    /// Audio peaks from 0 to 1, evenly spread over the clip.
+    pub waveform: Option<Arc<[f32]>>,
     pub drag: Option<Drag>,
     pub aspect_ratio: f32,
 }
@@ -198,6 +207,8 @@ pub fn render(state: TimelineState, cx: &mut Context<Player>) -> impl IntoElemen
         strip: theme.muted,
         dim: black().opacity(0.6),
         selection: theme.yellow,
+        waveform_band: black().opacity(0.45),
+        waveform: white().opacity(0.8),
         handle_grip: black().opacity(0.55),
         playhead: white(),
         knob_border: black().opacity(0.35),
@@ -222,6 +233,9 @@ pub fn render(state: TimelineState, cx: &mut Context<Player>) -> impl IntoElemen
             let handles = layout.as_ref().map(Layout::handles);
 
             paint_filmstrip(window, strip, &state, &colors);
+            if let Some(peaks) = &state.waveform {
+                paint_waveform(window, strip, peaks, &colors);
+            }
             if let Some(layout) = &layout {
                 paint_selection(window, strip, layout, &colors);
             }
@@ -246,6 +260,8 @@ struct Colors {
     strip: Hsla,
     dim: Hsla,
     selection: Hsla,
+    waveform_band: Hsla,
+    waveform: Hsla,
     handle_grip: Hsla,
     playhead: Hsla,
     knob_border: Hsla,
@@ -289,6 +305,42 @@ fn paint_filmstrip(
         window
             .paint_image(slot, image, corners, tile.clone(), 0, false)
             .ok();
+    }
+}
+
+/// Bars mirrored around the middle of a dark band along the strip's bottom,
+/// over the thumbnails and under the trim range.
+fn paint_waveform(window: &mut Window, strip: Bounds<Pixels>, peaks: &[f32], colors: &Colors) {
+    let band = Bounds {
+        origin: point(
+            strip.origin.x,
+            strip.origin.y + strip.size.height - px(WAVEFORM_HEIGHT),
+        ),
+        size: size(strip.size.width, px(WAVEFORM_HEIGHT)),
+    };
+    let radius = px(RADIUS);
+    window.paint_quad(fill(band, colors.waveform_band).corner_radii(Corners {
+        bottom_left: radius,
+        bottom_right: radius,
+        ..Default::default()
+    }));
+    let columns = (f32::from(band.size.width) / WAVEFORM_STEP) as usize;
+    let middle = band.center().y;
+    let reach = px(WAVEFORM_HEIGHT / 2. - 2.);
+    for (column, peak) in ffmpeg::resample_peaks(peaks, columns)
+        .into_iter()
+        .enumerate()
+    {
+        // Silence still shows as a hairline so the band reads as audio.
+        let half = (reach * peak).max(px(0.5));
+        let bar = Bounds {
+            origin: point(
+                band.origin.x + px(column as f32 * WAVEFORM_STEP),
+                middle - half,
+            ),
+            size: size(px(WAVEFORM_STEP - 0.5), half * 2.),
+        };
+        window.paint_quad(fill(bar, colors.waveform));
     }
 }
 

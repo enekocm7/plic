@@ -72,6 +72,9 @@ Finished exports stay listed under the queue: copy one to the clipboard
 as a file (paste it straight into Discord or Explorer) or show it in its
 folder. `Ctrl+Shift+C` copies the latest one.
 
+The timeline shows the clip's audio waveform (every track mixed) along the
+bottom of the filmstrip, so a shout or a shot is easy to find by sound.
+
 Exports run in the background while plic moves on to the next clip. The
 queue's "At once" buttons set how many may encode together (two by
 default); hardware encoders are held to two sessions and software encoders

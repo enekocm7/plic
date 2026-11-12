@@ -2,6 +2,7 @@
 
 use std::{
     cell::Cell,
+    collections::HashMap,
     path::PathBuf,
     rc::Rc,
     sync::Arc,
@@ -119,6 +120,10 @@ pub struct Player {
     crop: Option<CropRect>,
     filmstrip: Vec<Option<Arc<RenderImage>>>,
     filmstrip_workers: WorkerPool,
+    /// Audio peaks of the loaded clip, once worked out.
+    waveform: Option<Arc<[f32]>>,
+    /// Peaks of every clip opened so far; they take a moment to compute.
+    waveforms: HashMap<PathBuf, Arc<[f32]>>,
     audio: AudioDevice,
     volume: f32,
     muted: bool,
@@ -150,6 +155,8 @@ impl Player {
             crop: None,
             filmstrip: Vec::new(),
             filmstrip_workers: WorkerPool::new("filmstrip", 2),
+            waveform: None,
+            waveforms: HashMap::new(),
             audio: AudioDevice::Unopened,
             volume,
             muted: false,
@@ -179,6 +186,7 @@ impl Player {
         self.position = start;
         self.request_still(start, cx);
         self.request_filmstrip(cx);
+        self.request_waveform(cx);
         cx.notify();
     }
 
@@ -205,6 +213,7 @@ impl Player {
         self.drag = None;
         self.resume_after_drag = false;
         self.segments = Segments::default();
+        self.waveform = None;
         self.stale_frames.extend(self.frame.take());
         self.stale_frames.extend(self.filmstrip.drain(..).flatten());
     }
@@ -567,6 +576,7 @@ impl Player {
             position: self.position(),
             segments: self.trimmable.then(|| self.segments.clone()),
             filmstrip: self.filmstrip.clone(),
+            waveform: self.waveform.clone(),
             drag: self.drag,
             aspect_ratio: self
                 .source
@@ -574,6 +584,43 @@ impl Player {
                 .and_then(|source| source.info.video_size)
                 .map_or(16. / 9., FrameSize::aspect_ratio),
         }
+    }
+
+    /// Works out the clip's audio peaks to draw along the timeline, once
+    /// per clip.
+    fn request_waveform(&mut self, cx: &mut Context<Self>) {
+        let Some(source) = &self.source else {
+            return;
+        };
+        if let Some(peaks) = self.waveforms.get(&source.path) {
+            self.waveform = Some(peaks.clone());
+            return;
+        }
+        let Some(duration) = source.info.duration.filter(|_| source.info.has_audio) else {
+            return;
+        };
+        let path = source.path.clone();
+        let tracks = source.info.audio_tracks.len();
+        let generation = self.generation;
+        let job = cx.background_spawn({
+            let path = path.clone();
+            async move { ffmpeg::audio_peaks(&path, duration, tracks) }
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(peaks) = job.await else {
+                return;
+            };
+            let peaks: Arc<[f32]> = peaks.into();
+            this.update(cx, |this, cx| {
+                this.waveforms.insert(path, peaks.clone());
+                if this.generation == generation {
+                    this.waveform = Some(peaks);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Decodes evenly spaced keyframes to draw along the timeline.
