@@ -7,6 +7,7 @@ mod editor;
 mod frame_image;
 mod history;
 mod jobs;
+mod keymap;
 mod library_panel;
 mod player;
 mod settings_panel;
@@ -34,6 +35,13 @@ actions!(
         TogglePlay,
         SeekBackward,
         SeekForward,
+        ShuttleBackward,
+        ShuttleForward,
+        ZoomIn,
+        ZoomOut,
+        ZoomToFit,
+        Undo,
+        Redo,
         StepBackward,
         StepForward,
         JumpToStart,
@@ -63,66 +71,9 @@ actions!(
         ToggleTheme,
         ShowShortcuts,
         ShowSettings,
-        Undo,
-        Redo,
         Quit,
     ]
 );
-
-fn bind_keys(cx: &mut App) {
-    let shortcuts = format!("{CONTEXT} && !Input");
-    let shortcuts = Some(shortcuts.as_str());
-    cx.bind_keys([
-        KeyBinding::new("up", SelectPreviousClip, shortcuts),
-        KeyBinding::new("down", SelectNextClip, shortcuts),
-        KeyBinding::new("space", TogglePlay, shortcuts),
-        KeyBinding::new("k", TogglePlay, shortcuts),
-        KeyBinding::new("left", SeekBackward, shortcuts),
-        KeyBinding::new("right", SeekForward, shortcuts),
-        KeyBinding::new("j", SeekBackward, shortcuts),
-        KeyBinding::new("l", SeekForward, shortcuts),
-        KeyBinding::new(",", StepBackward, shortcuts),
-        KeyBinding::new(".", StepForward, shortcuts),
-        KeyBinding::new("home", JumpToStart, shortcuts),
-        KeyBinding::new("end", JumpToEnd, shortcuts),
-        KeyBinding::new("m", ToggleMute, shortcuts),
-        KeyBinding::new("b", ToggleMarker, shortcuts),
-        KeyBinding::new("]", NextMarker, shortcuts),
-        KeyBinding::new("[", PreviousMarker, shortcuts),
-        KeyBinding::new("shift-b", TrimToMarkers, shortcuts),
-        KeyBinding::new("f", ToggleFullscreen, shortcuts),
-        KeyBinding::new("escape", ExitFullscreen, shortcuts),
-        KeyBinding::new("i", MarkIn, shortcuts),
-        KeyBinding::new("o", MarkOut, shortcuts),
-        KeyBinding::new("shift-i", JumpToIn, shortcuts),
-        KeyBinding::new("shift-o", JumpToOut, shortcuts),
-        KeyBinding::new("x", ResetTrim, shortcuts),
-        KeyBinding::new("n", AddSegment, shortcuts),
-        KeyBinding::new("s", SplitAtPlayhead, shortcuts),
-        KeyBinding::new("r", ToggleLoop, shortcuts),
-        KeyBinding::new("delete", DeleteClip, shortcuts),
-        KeyBinding::new("?", ShowShortcuts, shortcuts),
-        KeyBinding::new("f11", ToggleFullscreen, Some(CONTEXT)),
-        KeyBinding::new("f1", ShowShortcuts, Some(CONTEXT)),
-        KeyBinding::new("ctrl-,", ShowSettings, Some(CONTEXT)),
-        // Text fields keep their own undo.
-        KeyBinding::new("ctrl-z", Undo, shortcuts),
-        KeyBinding::new("ctrl-shift-z", Redo, shortcuts),
-        KeyBinding::new("ctrl-y", Redo, shortcuts),
-        // Works from inside the editor's text fields too.
-        KeyBinding::new("ctrl-enter", ExportClip, Some(CONTEXT)),
-        KeyBinding::new("ctrl-shift-s", SaveFrame, Some(CONTEXT)),
-        KeyBinding::new("ctrl-shift-c", CopyLastExport, Some(CONTEXT)),
-        KeyBinding::new("ctrl-alt-s", SaveFrameJpeg, Some(CONTEXT)),
-        KeyBinding::new("ctrl-up", SelectPreviousClip, Some(CONTEXT)),
-        KeyBinding::new("ctrl-down", SelectNextClip, Some(CONTEXT)),
-        KeyBinding::new("ctrl-o", OpenFolder, Some(CONTEXT)),
-        KeyBinding::new("f5", Reload, Some(CONTEXT)),
-        KeyBinding::new("ctrl-r", Reload, Some(CONTEXT)),
-        KeyBinding::new("ctrl-t", ToggleTheme, Some(CONTEXT)),
-        KeyBinding::new("ctrl-q", Quit, None),
-    ]);
-}
 
 /// Opens the main window and runs until it closes.
 pub fn run(folder: Option<PathBuf>) {
@@ -140,12 +91,17 @@ pub fn run(folder: Option<PathBuf>) {
                 ThemeMode::Light
             };
             Theme::change(mode, None, cx);
-            bind_keys(cx);
+            keymap::apply(cx);
             cx.on_action(|_: &Quit, cx| {
                 crate::state::save();
+                crate::drafts::save();
                 cx.quit()
             });
-            cx.on_window_closed(|_, _| crate::state::save()).detach();
+            cx.on_window_closed(|_, _| {
+                crate::state::save();
+                crate::drafts::save();
+            })
+            .detach();
 
             let options = WindowOptions {
                 window_bounds: Some(

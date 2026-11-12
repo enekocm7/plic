@@ -82,6 +82,30 @@ impl Segments {
         &self.ranges
     }
 
+    /// Segments from saved ranges and names, with `active` the one being
+    /// edited. `None` if there are none or one is back to front.
+    pub fn from_parts(parts: Vec<(TrimRange, String)>, active: usize) -> Option<Self> {
+        if parts.is_empty()
+            || active >= parts.len()
+            || parts
+                .iter()
+                .any(|(range, _)| range.end.is_some_and(|end| end <= range.start))
+        {
+            return None;
+        }
+        let (ranges, names) = parts.into_iter().unzip();
+        Some(Self {
+            ranges,
+            names,
+            active,
+        })
+    }
+
+    /// The name of each segment, parallel to [`Self::ranges`].
+    pub fn names(&self) -> &[String] {
+        &self.names
+    }
+
     pub fn len(&self) -> usize {
         self.ranges.len()
     }
