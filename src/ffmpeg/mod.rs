@@ -6,6 +6,7 @@
 mod export;
 mod frames;
 mod probe;
+mod transform;
 
 use std::{process::Command, time::Duration};
 
@@ -14,6 +15,7 @@ pub use export::{
 };
 pub use frames::{FrameSize, RawFrame, VideoStream, extract_frame, extract_keyframe};
 pub use probe::{MediaInfo, keyframe_at_or_before, probe};
+pub use transform::{CropAspect, CropRect, Transform};
 
 pub trait CommandExt {
     /// Keeps the child from opening a console window. Release builds are GUI

@@ -19,10 +19,12 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectState};
+use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, Sizable as _, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _, WindowExt as _,
+    h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -31,7 +33,7 @@ use super::app::{ClipEntry, ClipStatus, PlicApp, display_name};
 use super::library_panel::format_size;
 use super::{AddSegment, SplitAtPlayhead};
 use crate::{
-    ffmpeg::{self, ExportMode},
+    ffmpeg::{self, CropAspect, ExportMode, Transform},
     library, timestamp,
     trim::{self, TrimRange},
 };
@@ -72,6 +74,8 @@ pub struct Editor {
     start: Entity<InputState>,
     end: Entity<InputState>,
     folder: Entity<SelectState<FolderList>>,
+    /// Where the crop sits, from the left or top edge (0) to the other (1).
+    crop_position: Entity<SliderState>,
     /// Why the typed times cannot be used, shown under the fields.
     time_error: Option<SharedString>,
     /// Why the last export attempt was refused, shown under the button.
@@ -105,7 +109,16 @@ impl Editor {
             .searchable(true)
         });
 
+        let crop_position = cx.new(|_| {
+            SliderState::new()
+                .min(0.0)
+                .max(1.0)
+                .step(0.01)
+                .default_value(0.5)
+        });
+
         let subscriptions = vec![
+            cx.subscribe_in(&crop_position, window, PlicApp::on_crop_position_event),
             cx.subscribe_in(&name, window, PlicApp::on_name_event),
             cx.subscribe_in(&part_name, window, PlicApp::on_part_name_event),
             cx.subscribe_in(&start, window, |this, _, event, window, cx| {
@@ -123,6 +136,7 @@ impl Editor {
             start,
             end,
             folder,
+            crop_position,
             time_error: None,
             export_error: None,
             mode: ExportMode::default(),
@@ -155,6 +169,12 @@ impl PlicApp {
             .name
             .update(cx, |input, cx| input.set_value(name, window, cx));
         self.sync_time_fields(window, cx);
+        let position = self
+            .current()
+            .map_or(0.5, |entry| entry.transform.crop_position);
+        self.editor
+            .crop_position
+            .update(cx, |slider, cx| slider.set_value(position, window, cx));
         self.editor.folder.update(cx, |select, cx| match &folder {
             Some(folder) => select.set_selected_value(folder, window, cx),
             None => select.set_selected_index(None, window, cx),
@@ -754,6 +774,181 @@ impl PlicApp {
             })
     }
 
+    fn on_crop_position_event(
+        &mut self,
+        _: &Entity<SliderState>,
+        event: &SliderEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (SliderEvent::Change(value) | SliderEvent::Release(value)) = event;
+        let position = value.start();
+        self.change_transform(|transform| transform.crop_position = position, cx);
+    }
+
+    /// Edits the selected clip's transform and updates the viewer's crop
+    /// overlay to match.
+    fn change_transform(&mut self, edit: impl FnOnce(&mut Transform), cx: &mut Context<Self>) {
+        let Some(entry) = self.current_mut() else {
+            return;
+        };
+        edit(&mut entry.transform);
+        let crop = entry
+            .info()
+            .and_then(|info| info.video_size)
+            .and_then(|size| entry.transform.crop_rect(size));
+        self.player
+            .update(cx, |player, cx| player.set_crop(crop, cx));
+        self.editor.export_error = None;
+        cx.notify();
+    }
+
+    /// Crop, rotation and flips for the selected clip.
+    fn render_frame_controls(&self, entry: &ClipEntry, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let transform = entry.transform;
+        let crop_button = |id: &'static str, label: &'static str, aspect: Option<CropAspect>| {
+            Button::new(id)
+                .ghost()
+                .xsmall()
+                .flex_1()
+                .label(label)
+                .selected(transform.crop == aspect)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.change_transform(|transform| transform.crop = aspect, cx)
+                }))
+        };
+        let mut crops = vec![crop_button("crop-none", "Full", None)];
+        for aspect in CropAspect::ALL {
+            let id = match aspect {
+                CropAspect::Wide => "crop-wide",
+                CropAspect::Tall => "crop-tall",
+                CropAspect::Square => "crop-square",
+                CropAspect::Portrait => "crop-portrait",
+            };
+            crops.push(crop_button(id, aspect.label(), Some(aspect)));
+        }
+        let degrees = transform.rotation.degrees();
+
+        v_flex()
+            .gap_1p5()
+            .child(
+                h_flex()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.muted_foreground)
+                            .child("Frame"),
+                    )
+                    .when(!transform.is_identity(), |row| {
+                        row.child(
+                            Button::new("reset-frame")
+                                .ghost()
+                                .xsmall()
+                                .label("Reset")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.change_transform(
+                                        |transform| *transform = Transform::identity(),
+                                        cx,
+                                    );
+                                    this.editor
+                                        .crop_position
+                                        .update(cx, |slider, cx| slider.set_value(0.5, window, cx));
+                                })),
+                        )
+                    }),
+            )
+            .child(h_flex().gap_0p5().children(crops))
+            .when(transform.crop.is_some(), |column| {
+                column.child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child("Position"),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .child(Slider::new(&self.editor.crop_position)),
+                        ),
+                )
+            })
+            .child(
+                h_flex()
+                    .gap_0p5()
+                    .child(
+                        Button::new("rotate-ccw")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::RotateCcw)
+                            .tooltip("Rotate left")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.change_transform(
+                                    |transform| {
+                                        transform.rotation = transform.rotation.counter_clockwise()
+                                    },
+                                    cx,
+                                )
+                            })),
+                    )
+                    .child(
+                        Button::new("rotate-cw")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::RotateCw)
+                            .tooltip("Rotate right")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.change_transform(
+                                    |transform| transform.rotation = transform.rotation.clockwise(),
+                                    cx,
+                                )
+                            })),
+                    )
+                    .child(
+                        Button::new("flip-horizontal")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::FlipHorizontal2)
+                            .tooltip("Flip horizontally")
+                            .selected(transform.flip_horizontal)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.change_transform(
+                                    |transform| transform.flip_horizontal ^= true,
+                                    cx,
+                                )
+                            })),
+                    )
+                    .child(
+                        Button::new("flip-vertical")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::FlipVertical2)
+                            .tooltip("Flip vertically")
+                            .selected(transform.flip_vertical)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.change_transform(
+                                    |transform| transform.flip_vertical ^= true,
+                                    cx,
+                                )
+                            })),
+                    )
+                    .child(div().flex_1())
+                    .when(degrees != 0, |row| {
+                        row.child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(format!("Rotated {degrees}°")),
+                        )
+                    }),
+            )
+    }
+
     fn set_mode(&mut self, lossless: bool, cx: &mut Context<Self>) {
         self.editor.mode = if lossless {
             ExportMode::StreamCopy
@@ -765,7 +960,11 @@ impl PlicApp {
     }
 
     pub(super) fn render_export_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let lossless = self.editor.mode == ExportMode::StreamCopy;
+        // Cropping and rotating are filters, so they always re-encode.
+        let transformed = self
+            .current()
+            .is_some_and(|entry| !entry.transform.is_identity());
+        let lossless = self.editor.mode == ExportMode::StreamCopy && !transformed;
         // Resolved before `entry` borrows `self` for the rest of the render.
         let keyframe = match self.current() {
             Some(entry) if lossless && entry.info().is_some() => {
@@ -915,17 +1114,18 @@ impl PlicApp {
                 v_flex()
                     .flex_1()
                     .child(div().text_sm().child("Lossless"))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child("Instant copy, cut on a keyframe"),
-                    ),
+                    .child(div().text_xs().text_color(theme.muted_foreground).child(
+                        if transformed {
+                            "Off while the frame is cropped, rotated or flipped"
+                        } else {
+                            "Instant copy, cut on a keyframe"
+                        },
+                    )),
             )
             .child(
                 Switch::new("lossless")
                     .checked(lossless)
-                    .disabled(!enabled)
+                    .disabled(!enabled || transformed)
                     .tooltip(
                         "Copy the video without re-encoding: instant and with no quality loss, \
                          but the start moves back to the nearest keyframe",
@@ -1021,6 +1221,9 @@ impl PlicApp {
                         )
                         .when_some(entry, |panel, entry| {
                             panel.child(self.render_segments(entry, cx))
+                        })
+                        .when_some(entry.filter(|_| enabled), |panel, entry| {
+                            panel.child(self.render_frame_controls(entry, cx))
                         })
                         .child(summary)
                         .child(v_flex().gap_1p5().child(mode_row).children(snapped))
