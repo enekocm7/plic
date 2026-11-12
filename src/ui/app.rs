@@ -17,9 +17,10 @@ use gpui_kit::*;
 
 use super::{
     AddSegment, CONTEXT, CopyLastExport, DeleteClip, ExportClip, JumpToEnd, JumpToIn, JumpToOut,
-    JumpToStart, MarkIn, MarkOut, OpenFolder, Reload, ResetTrim, SaveFrame, SaveFrameJpeg,
-    SeekBackward, SeekForward, SelectNextClip, SelectPreviousClip, ShowShortcuts, SplitAtPlayhead,
-    StepBackward, StepForward, ToggleLoop, ToggleMute, TogglePlay, ToggleTheme,
+    JumpToStart, MarkIn, MarkOut, NextMarker, OpenFolder, PreviousMarker, Reload, ResetTrim,
+    SaveFrame, SaveFrameJpeg, SeekBackward, SeekForward, SelectNextClip, SelectPreviousClip,
+    ShowShortcuts, SplitAtPlayhead, StepBackward, StepForward, ToggleLoop, ToggleMarker,
+    ToggleMute, TogglePlay, ToggleTheme, TrimToMarkers,
     editor::Editor,
     frame_image,
     jobs::{ExportJob, FinishedExport},
@@ -586,6 +587,26 @@ impl PlicApp {
         self.player.update(cx, |player, cx| player.toggle_mute(cx));
     }
 
+    fn toggle_marker(&mut self, _: &ToggleMarker, _: &mut Window, cx: &mut Context<Self>) {
+        self.player
+            .update(cx, |player, cx| player.toggle_marker(cx));
+    }
+
+    fn next_marker(&mut self, _: &NextMarker, window: &mut Window, cx: &mut Context<Self>) {
+        self.player
+            .update(cx, |player, cx| player.jump_to_next_marker(window, cx));
+    }
+
+    fn previous_marker(&mut self, _: &PreviousMarker, window: &mut Window, cx: &mut Context<Self>) {
+        self.player
+            .update(cx, |player, cx| player.jump_to_previous_marker(window, cx));
+    }
+
+    fn trim_to_markers(&mut self, _: &TrimToMarkers, _: &mut Window, cx: &mut Context<Self>) {
+        self.player
+            .update(cx, |player, cx| player.trim_between_markers(cx));
+    }
+
     fn jump_to_start(&mut self, _: &JumpToStart, window: &mut Window, cx: &mut Context<Self>) {
         self.player
             .update(cx, |player, cx| player.seek(Duration::ZERO, window, cx));
@@ -825,6 +846,10 @@ impl Render for PlicApp {
             .on_action(cx.listener(Self::jump_to_start))
             .on_action(cx.listener(Self::jump_to_end))
             .on_action(cx.listener(Self::toggle_mute))
+            .on_action(cx.listener(Self::toggle_marker))
+            .on_action(cx.listener(Self::next_marker))
+            .on_action(cx.listener(Self::previous_marker))
+            .on_action(cx.listener(Self::trim_to_markers))
             .on_action(cx.listener(Self::mark_in))
             .on_action(cx.listener(Self::mark_out))
             .on_action(cx.listener(Self::reset_trim))

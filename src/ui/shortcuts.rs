@@ -22,6 +22,9 @@ const GROUPS: &[Group] = &[
             (&[",", "."], "Previous or next frame"),
             (&["home", "end"], "Start or end of the clip"),
             (&["m"], "Mute"),
+            (&["b"], "Add or remove a marker"),
+            (&["[", "]"], "Previous or next marker"),
+            (&["shift-b"], "Trim to the markers around the playhead"),
         ],
     ),
     (
