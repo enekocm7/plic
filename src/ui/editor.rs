@@ -45,6 +45,9 @@ pub const PANEL_WIDTH: f32 = 320.;
 type FolderList = SearchableVec<SharedString>;
 
 /// Resolutions offered as caps, by the picture's shorter side.
+/// What the clips folder itself is called in the list of destinations.
+pub(super) const ROOT_LABEL: &str = "Clips folder";
+
 const RESOLUTIONS: [u32; 3] = [1080, 720, 480];
 
 /// Frame rates offered as caps.
@@ -197,7 +200,7 @@ impl PlicApp {
         let (name, folder) = match self.current() {
             Some(entry) => (
                 entry.name.clone(),
-                self.destination(entry).map(display_name),
+                self.destination(entry).map(|path| self.folder_label(path)),
             ),
             None => (String::new(), None),
         };
@@ -293,7 +296,7 @@ impl PlicApp {
         let names = FolderList::new(
             self.folders
                 .iter()
-                .map(|path| display_name(path))
+                .map(|path| self.folder_label(path))
                 .collect::<Vec<_>>(),
         );
         self.editor
@@ -444,7 +447,7 @@ impl PlicApp {
         let Some(folder) = self
             .folders
             .iter()
-            .find(|path| display_name(path) == *name)
+            .find(|path| self.folder_label(path) == *name)
             .cloned()
         else {
             return;
@@ -458,7 +461,7 @@ impl PlicApp {
     }
 
     /// Where the clip will be exported: its own choice, else the folder used
-    /// last, else the first subfolder.
+    /// last, else the first subfolder, else the clips folder itself.
     pub(super) fn destination<'a>(&'a self, entry: &'a ClipEntry) -> Option<&'a Path> {
         let known = |path: &&Path| self.folders.iter().any(|folder| folder == path);
         entry
@@ -467,10 +470,25 @@ impl PlicApp {
             .filter(known)
             .or(self.last_folder.as_deref().filter(known))
             .or(self.default_destination())
-            .or(self.folders.first().map(|path| path.as_path()))
+            .or(self
+                .folders
+                .iter()
+                .map(PathBuf::as_path)
+                .find(|path| Some(*path) != self.folder.as_deref())
+                .or(self.folders.first().map(PathBuf::as_path)))
     }
 
-    /// The subfolder named in the settings, if it exists.
+    /// How a destination is listed: subfolders by name, the clips folder
+    /// itself as [`ROOT_LABEL`].
+    pub(super) fn folder_label(&self, path: &Path) -> SharedString {
+        if self.folder.as_deref() == Some(path) {
+            ROOT_LABEL.into()
+        } else {
+            display_name(path)
+        }
+    }
+
+    /// The destination named in the settings, if it exists.
     fn default_destination(&self) -> Option<&Path> {
         let name = crate::settings::get().default_destination;
         if name.is_empty() {
@@ -478,7 +496,7 @@ impl PlicApp {
         }
         self.folders
             .iter()
-            .find(|path| display_name(path) == name.as_str())
+            .find(|path| self.folder_label(path) == *name)
             .map(PathBuf::as_path)
     }
 
@@ -531,7 +549,7 @@ impl PlicApp {
                             div()
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
-                                .child("Exported clips can be saved into any subfolder of the clips folder."),
+                                .child("Exported clips can be saved into the clips folder or any subfolder of it."),
                         )
                         .child(Input::new(&input)),
                 )
@@ -585,8 +603,12 @@ impl PlicApp {
         }
 
         self.folders.push(path.clone());
-        self.folders
-            .sort_by_cached_key(|folder| display_name(folder).to_lowercase());
+        self.folders.sort_by_cached_key(|folder| {
+            (
+                Some(folder.as_path()) != self.folder.as_deref(),
+                display_name(folder).to_lowercase(),
+            )
+        });
         self.last_folder = Some(path.clone());
         if let Some(entry) = self.current_mut() {
             entry.folder = Some(path);
@@ -1725,7 +1747,7 @@ impl PlicApp {
                                                     .placeholder(if has_folders {
                                                         "Choose a folder"
                                                     } else {
-                                                        "No subfolders yet"
+                                                        "No folders yet"
                                                     })
                                                     .disabled(!enabled || !has_folders),
                                             ),

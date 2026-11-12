@@ -89,6 +89,20 @@ impl PlicApp {
         self.clips[index].status = ClipStatus::Exporting;
         self.next_job_id += 1;
         let batch = self.next_job_id;
+        // An export saved beside the recordings must not turn up as one.
+        let in_root = requests
+            .iter()
+            .filter(|request| request.output.parent() == self.folder.as_deref())
+            .map(|request| request.output.clone())
+            .collect::<Vec<_>>();
+        if !in_root.is_empty() {
+            crate::state::update(|state| {
+                in_root
+                    .iter()
+                    .for_each(|output| state.remember_root_export(output))
+            });
+            crate::state::save();
+        }
         for request in requests {
             self.next_job_id += 1;
             self.jobs.push(ExportJob {

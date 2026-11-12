@@ -11,6 +11,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 const MAX_RECENT: usize = 8;
+const MAX_ROOT_EXPORTS: usize = 2000;
 
 /// The window's outer bounds in logical pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -34,6 +35,9 @@ pub struct State {
     pub dismissed_update: Option<String>,
     /// Unix seconds of the last successful update check.
     pub last_update_check: Option<u64>,
+    /// Exports saved straight into a clips folder, so they are not offered
+    /// as recordings to edit. Oldest first.
+    pub root_exports: Vec<PathBuf>,
 }
 
 impl Default for State {
@@ -45,6 +49,7 @@ impl Default for State {
             dark_theme: true,
             dismissed_update: None,
             last_update_check: None,
+            root_exports: Vec::new(),
         }
     }
 }
@@ -57,6 +62,15 @@ impl State {
             .iter()
             .map(PathBuf::as_path)
             .find(|folder| folder.is_dir())
+    }
+
+    /// Notes an export written into a clips folder itself.
+    pub fn remember_root_export(&mut self, output: &Path) {
+        if !self.root_exports.iter().any(|known| known == output) {
+            self.root_exports.push(output.to_path_buf());
+            let excess = self.root_exports.len().saturating_sub(MAX_ROOT_EXPORTS);
+            self.root_exports.drain(..excess);
+        }
     }
 
     /// Moves `folder` to the front of the recent folders.
@@ -136,6 +150,17 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn root_exports_are_unique_and_capped() {
+        let mut state = State::default();
+        for index in 0..MAX_ROOT_EXPORTS + 5 {
+            state.remember_root_export(Path::new(&format!("/clips/{index}.mp4")));
+        }
+        state.remember_root_export(Path::new("/clips/10.mp4"));
+        assert_eq!(state.root_exports.len(), MAX_ROOT_EXPORTS);
+        assert_eq!(state.root_exports[0], Path::new("/clips/5.mp4"));
     }
 
     #[test]

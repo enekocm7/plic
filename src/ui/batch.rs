@@ -401,7 +401,13 @@ impl PlicApp {
         let theme = cx.theme();
         let count = self.selection().len();
         let app = cx.entity().downgrade();
-        let folders = self.folders.clone();
+        // Moving into the folder a clip is already in does nothing.
+        let folders: Vec<_> = self
+            .folders
+            .iter()
+            .filter(|folder| Some(folder.as_path()) != self.folder.as_deref())
+            .cloned()
+            .collect();
         h_flex()
             .flex_none()
             .mx_2()

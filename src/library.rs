@@ -46,7 +46,8 @@ pub struct Library {
     pub clips: Vec<ClipFile>,
     /// Originals already exported and moved to [`edited_dir`], newest first.
     pub settled: Vec<ClipFile>,
-    /// Subfolders that exports can be saved into, sorted by name.
+    /// Where exports can be saved: the clips folder itself first, then its
+    /// subfolders sorted by name.
     pub folders: Vec<PathBuf>,
 }
 
@@ -57,6 +58,8 @@ impl Library {
             fs::read_dir(root).with_context(|| format!("could not list {}", root.display()))?;
         let mut clips = Vec::new();
         let mut folders = Vec::new();
+        // Exports saved into the clips folder are results, not recordings.
+        let exported = crate::state::get().root_exports;
 
         for entry in entries {
             let entry = entry.context("could not read a directory entry")?;
@@ -69,12 +72,15 @@ impl Library {
                 if entry.file_name().to_string_lossy() != edited_dir() && !hidden {
                     folders.push(path);
                 }
-            } else if let Some(clip) = ClipFile::from_entry(path, &metadata) {
+            } else if !exported.contains(&path)
+                && let Some(clip) = ClipFile::from_entry(path, &metadata)
+            {
                 clips.push(clip);
             }
         }
         clips.sort_by_cached_key(|clip| sort_key(&clip.path));
         folders.sort_by_cached_key(|path| sort_key(path));
+        folders.insert(0, root.to_path_buf());
 
         // A missing or unreadable edited folder just means nothing is settled.
         let mut settled: Vec<ClipFile> = fs::read_dir(root.join(edited_dir()))
@@ -432,7 +438,8 @@ mod tests {
         fs::remove_dir_all(&root)?;
 
         assert_eq!(clips, ["a.mkv", "b.MP4"]);
-        assert_eq!(folders, ["Highlights"]);
+        assert_eq!(folders[1..], ["Highlights"]);
+        assert_eq!(library.folders[0], root);
         Ok(())
     }
 }

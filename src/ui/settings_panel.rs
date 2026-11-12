@@ -133,7 +133,7 @@ impl PlicApp {
                         ))
                         .child(field(
                             "Default destination",
-                            "Subfolder that exports go to when you have not chosen one.",
+                            "Subfolder, or \"Clips folder\", that exports go to when you have not chosen one.",
                             &destination,
                         ))
                         .child(field(

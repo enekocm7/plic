@@ -3,7 +3,7 @@
 Watch, trim and file away video clips.
 
 plic opens a folder of recordings, plays them back with sound, and lets
-you cut each one down and save it into a subfolder. Once a clip is
+you cut each one down and save it into a subfolder or beside the originals. Once a clip is
 exported, its original moves to `edited/`, so the list only holds what is
 still to be done.
 
