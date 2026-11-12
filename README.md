@@ -39,3 +39,27 @@ cargo test
 mise run dev    # debug build on ./clips
 mise run run    # release build, copied into ./clips
 ```
+
+CI runs `cargo fmt --check`, `cargo clippy`, `cargo build` and `cargo test`
+on Windows for every push to `master` and every pull request.
+
+## Releases
+
+Releases are built by GitHub Actions from version tags. `Cargo.toml` is the
+single source of the version; the release fails if the tag does not match it.
+
+1. Bump `version` in `Cargo.toml` and run `cargo build` to update `Cargo.lock`.
+2. Commit, then tag and push: `git tag v0.9.0 && git push origin master v0.9.0`.
+
+The workflow publishes a GitHub release with an installer
+(`plic-<version>-setup.exe`), a portable `.zip` and `SHA256SUMS.txt`.
+
+To build the installer locally, install [Inno Setup](https://jrsoftware.org/isinfo.php)
+and run:
+
+```sh
+cargo build --release
+iscc /DAppVersion=0.8.0 installer\plic.iss
+```
+
+The installer lands in `target/dist/`.
