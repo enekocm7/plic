@@ -1,0 +1,49 @@
+{
+    "version": "0.8.0",
+    "description": "Watch, trim and file away video clips.",
+    "homepage": "https://github.com/enekocm7/plic",
+    "license": "GPL-3.0-only",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/enekocm7/plic/releases/download/v0.8.0/plic-0.8.0-windows-x64.zip",
+            "hash": "b677ecda6d3474403b481658bdc923538bea977e52d8a1b6b0b2004658062d34"
+        }
+    },
+    "bin": "plic.exe",
+    "shortcuts": [
+        [
+            "plic.exe",
+            "plic"
+        ]
+    ],
+    "post_install": [
+        "# \"Open with plic\" on folders, inside folders and on videos, for this user.",
+        "$exe = \"$dir\\plic.exe\"",
+        "foreach ($key in 'Directory', 'Directory\\Background', 'SystemFileAssociations\\.mp4', 'SystemFileAssociations\\.mov', 'SystemFileAssociations\\.mkv', 'SystemFileAssociations\\.webm', 'SystemFileAssociations\\.m4v') {",
+        "    $argument = if ($key -eq 'Directory\\Background') { '%V' } else { '%1' }",
+        "    $path = \"HKCU:\\Software\\Classes\\$key\\shell\\plic\"",
+        "    New-Item -Path \"$path\\command\" -Force | Out-Null",
+        "    Set-ItemProperty -Path $path -Name '(default)' -Value 'Open with plic'",
+        "    Set-ItemProperty -Path $path -Name 'Icon' -Value \"$exe,0\"",
+        "    Set-ItemProperty -Path \"$path\\command\" -Name '(default)' -Value ('\"{0}\" \"{1}\"' -f $exe, $argument)",
+        "}"
+    ],
+    "uninstaller": {
+        "script": [
+            "foreach ($key in 'Directory', 'Directory\\Background', 'SystemFileAssociations\\.mp4', 'SystemFileAssociations\\.mov', 'SystemFileAssociations\\.mkv', 'SystemFileAssociations\\.webm', 'SystemFileAssociations\\.m4v') {",
+            "    Remove-Item -Path \"HKCU:\\Software\\Classes\\$key\\shell\\plic\" -Recurse -Force -ErrorAction SilentlyContinue",
+            "}"
+        ]
+    },
+    "checkver": "github",
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/enekocm7/plic/releases/download/v$version/plic-$version-windows-x64.zip"
+            }
+        },
+        "hash": {
+            "url": "$baseurl/SHA256SUMS.txt"
+        }
+    }
+}
