@@ -185,7 +185,7 @@ and run:
 
 ```sh
 cargo build --release
-iscc /DAppVersion=0.8.0 installer\plic.iss
+iscc /DAppVersion=0.8.1 installer\plic.iss
 ```
 
 The installer lands in `target/dist/`.
