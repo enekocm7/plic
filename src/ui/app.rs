@@ -658,6 +658,40 @@ impl PlicApp {
         shortcuts::open(window, cx);
     }
 
+    /// Opens what was dropped on the window: a folder replaces the library,
+    /// and a video file opens the folder it lives in with that clip
+    /// selected. Nothing is moved.
+    fn handle_drop(
+        &mut self,
+        dropped: &ExternalPaths,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let paths = dropped.paths();
+        if let Some(folder) = paths.iter().find(|path| path.is_dir()) {
+            self.load_folder(folder.clone(), window, cx);
+            return;
+        }
+        let Some(first) = paths
+            .iter()
+            .find(|path| path.is_file() && library::is_video(path))
+        else {
+            return;
+        };
+        if let Some(parent) = first.parent()
+            && self.folder.as_deref() != Some(parent)
+        {
+            self.load_folder(parent.to_path_buf(), window, cx);
+        }
+        if let Some(index) = self.index_of(first) {
+            self.select(index, window, cx);
+        } else if let Some(index) = self.settled_index_of(first) {
+            self.settled_open = true;
+            self.load_settled_details(cx);
+            self.select_settled(index, window, cx);
+        }
+    }
+
     fn toggle_theme(&mut self, _: &ToggleTheme, window: &mut Window, cx: &mut Context<Self>) {
         let mode = if cx.theme().mode.is_dark() {
             ThemeMode::Light
@@ -839,6 +873,9 @@ impl Render for PlicApp {
             .on_action(cx.listener(Self::export_clip))
             .on_action(cx.listener(Self::delete_clip))
             .on_action(cx.listener(Self::show_shortcuts))
+            .on_drop(cx.listener(|this, dropped: &ExternalPaths, window, cx| {
+                this.handle_drop(dropped, window, cx)
+            }))
             .child(self.render_title_bar(cx))
             .child(
                 h_flex()
