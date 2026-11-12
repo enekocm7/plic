@@ -1,0 +1,118 @@
+//! User settings, stored as JSON in the app config directory.
+
+use std::{
+    fs,
+    path::PathBuf,
+    sync::{OnceLock, RwLock},
+};
+
+use anyhow::{Context as _, Result};
+use serde::{Deserialize, Serialize};
+
+/// The folder originals are moved to after export, unless changed.
+pub const DEFAULT_ARCHIVE_FOLDER: &str = "edited";
+pub const DEFAULT_SEEK_STEP_SECS: u32 = 5;
+const MAX_SEEK_STEP_SECS: u32 = 600;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    /// How far the arrow keys move the playhead.
+    pub seek_step_secs: u32,
+    /// Folder, inside the clips folder, that exported originals move to.
+    pub archive_folder: String,
+    /// Name of the subfolder exports go to when nothing else was chosen.
+    /// Empty uses the one used last.
+    pub default_destination: String,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            seek_step_secs: DEFAULT_SEEK_STEP_SECS,
+            archive_folder: DEFAULT_ARCHIVE_FOLDER.to_owned(),
+            default_destination: String::new(),
+        }
+    }
+}
+
+impl Settings {
+    /// Replaces values that cannot be used with their defaults.
+    pub fn sanitized(mut self) -> Self {
+        self.seek_step_secs = self.seek_step_secs.clamp(1, MAX_SEEK_STEP_SECS);
+        self.archive_folder = self.archive_folder.trim().to_owned();
+        if crate::library::validate_file_stem(&self.archive_folder).is_err() {
+            self.archive_folder = DEFAULT_ARCHIVE_FOLDER.to_owned();
+        }
+        self.default_destination = self.default_destination.trim().to_owned();
+        self
+    }
+}
+
+fn current() -> &'static RwLock<Settings> {
+    static CURRENT: OnceLock<RwLock<Settings>> = OnceLock::new();
+    CURRENT.get_or_init(|| RwLock::new(Settings::default()))
+}
+
+/// The settings in effect.
+pub fn get() -> Settings {
+    current()
+        .read()
+        .map(|settings| settings.clone())
+        .unwrap_or_default()
+}
+
+fn file() -> Option<PathBuf> {
+    dirs::config_dir().map(|dir| dir.join("plic").join("settings.json"))
+}
+
+/// Reads the settings file, if there is one. A missing or unreadable file
+/// leaves the defaults.
+pub fn load() {
+    let Some(text) = file().and_then(|path| fs::read_to_string(path).ok()) else {
+        return;
+    };
+    if let Ok(settings) = serde_json::from_str::<Settings>(&text)
+        && let Ok(mut current) = current().write()
+    {
+        *current = settings.sanitized();
+    }
+}
+
+/// Applies new settings and saves them.
+pub fn update(settings: Settings) -> Result<()> {
+    let settings = settings.sanitized();
+    if let Ok(mut current) = current().write() {
+        *current = settings.clone();
+    }
+    let path = file().context("there is no config directory")?;
+    fs::create_dir_all(path.parent().context("settings path has no parent")?)
+        .context("could not create the config directory")?;
+    fs::write(&path, serde_json::to_string_pretty(&settings)?)
+        .with_context(|| format!("could not write {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_fields_take_defaults() {
+        let settings: Settings = serde_json::from_str(r#"{"seek_step_secs": 10}"#).unwrap();
+        assert_eq!(settings.seek_step_secs, 10);
+        assert_eq!(settings.archive_folder, DEFAULT_ARCHIVE_FOLDER);
+    }
+
+    #[test]
+    fn unusable_values_are_replaced() {
+        let settings = Settings {
+            seek_step_secs: 0,
+            archive_folder: "a/b".into(),
+            default_destination: "  Best  ".into(),
+        }
+        .sanitized();
+        assert_eq!(settings.seek_step_secs, 1);
+        assert_eq!(settings.archive_folder, DEFAULT_ARCHIVE_FOLDER);
+        assert_eq!(settings.default_destination, "Best");
+    }
+}

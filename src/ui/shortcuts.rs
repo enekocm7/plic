@@ -50,6 +50,7 @@ const GROUPS: &[Group] = &[
             (&["ctrl-o"], "Open a folder"),
             (&["f5"], "Rescan the folder"),
             (&["ctrl-t"], "Light or dark theme"),
+            (&["ctrl-,"], "Settings"),
         ],
     ),
 ];

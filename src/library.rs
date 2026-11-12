@@ -12,7 +12,10 @@ use std::{
 use anyhow::{Context, Result, bail};
 
 /// Originals are moved here once exported, so they drop out of the queue.
-pub const EDITED_DIR: &str = "edited";
+/// Name of the folder exported originals move to.
+pub fn edited_dir() -> String {
+    crate::settings::get().archive_folder
+}
 
 const VIDEO_EXTENSIONS: [&str; 5] = ["mp4", "mov", "mkv", "webm", "m4v"];
 
@@ -41,7 +44,7 @@ impl ClipFile {
 #[derive(Debug, Clone)]
 pub struct Library {
     pub clips: Vec<ClipFile>,
-    /// Originals already exported and moved to [`EDITED_DIR`], newest first.
+    /// Originals already exported and moved to [`edited_dir`], newest first.
     pub settled: Vec<ClipFile>,
     /// Subfolders that exports can be saved into, sorted by name.
     pub folders: Vec<PathBuf>,
@@ -63,7 +66,7 @@ impl Library {
             };
             if metadata.is_dir() {
                 let hidden = entry.file_name().to_string_lossy().starts_with('.');
-                if entry.file_name() != EDITED_DIR && !hidden {
+                if entry.file_name().to_string_lossy() != edited_dir() && !hidden {
                     folders.push(path);
                 }
             } else if let Some(clip) = ClipFile::from_entry(path, &metadata) {
@@ -74,7 +77,7 @@ impl Library {
         folders.sort_by_cached_key(|path| sort_key(path));
 
         // A missing or unreadable edited folder just means nothing is settled.
-        let mut settled: Vec<ClipFile> = fs::read_dir(root.join(EDITED_DIR))
+        let mut settled: Vec<ClipFile> = fs::read_dir(root.join(edited_dir()))
             .into_iter()
             .flatten()
             .flatten()
@@ -130,7 +133,7 @@ fn is_partial_export(path: &Path) -> bool {
 pub fn archive_original(source: &Path) -> Result<PathBuf> {
     let parent = source.parent().unwrap_or_else(|| Path::new("."));
     let name = source.file_name().context("source has no file name")?;
-    let directory = parent.join(EDITED_DIR);
+    let directory = parent.join(edited_dir());
     fs::create_dir_all(&directory)
         .with_context(|| format!("could not create {}", directory.display()))?;
     let destination = directory.join(name);
@@ -142,7 +145,7 @@ pub fn archive_original(source: &Path) -> Result<PathBuf> {
     Ok(destination)
 }
 
-/// Moves an archived original from [`EDITED_DIR`] back into the clips
+/// Moves an archived original from [`edited_dir`] back into the clips
 /// folder, undoing [`archive_original`].
 pub fn restore_original(archived: &Path) -> Result<PathBuf> {
     let name = archived.file_name().context("clip has no file name")?;
@@ -279,7 +282,7 @@ mod tests {
         fs::write(&clip, b"video")?;
 
         let archived = archive_original(&clip)?;
-        assert_eq!(archived, root.join(EDITED_DIR).join("clip.mp4"));
+        assert_eq!(archived, root.join(edited_dir()).join("clip.mp4"));
         let library = Library::scan(&root)?;
         assert!(library.clips.is_empty());
         assert_eq!(library.settled.len(), 1);
@@ -332,7 +335,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("plic-scan-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("Highlights"))?;
-        fs::create_dir_all(root.join(EDITED_DIR))?;
+        fs::create_dir_all(root.join(edited_dir()))?;
         fs::create_dir_all(root.join(".cache"))?;
         for file in ["b.MP4", "a.mkv", "notes.txt", ".a.plic-1-0.mp4"] {
             fs::write(root.join(file), b"")?;

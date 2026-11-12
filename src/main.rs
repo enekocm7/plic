@@ -8,6 +8,7 @@ mod ffmpeg;
 mod library;
 mod playback;
 mod scheduler;
+mod settings;
 mod timestamp;
 mod trim;
 mod ui;
@@ -16,6 +17,7 @@ mod worker;
 use std::path::PathBuf;
 
 fn main() {
+    settings::load();
     // `plic <folder>` opens that folder; otherwise the working directory, which
     // keeps the old "run it inside the clips folder" workflow working.
     let folder = std::env::args_os()

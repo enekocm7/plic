@@ -363,7 +363,7 @@ impl PlicApp {
                         let message = folder.map_or_else(String::new, |folder| {
                             format!(
                                 "Saved to {folder}, original moved to {}",
-                                library::EDITED_DIR
+                                library::edited_dir()
                             )
                         });
                         window.push_notification(Notification::success(message).title(title), cx);

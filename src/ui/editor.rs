@@ -433,7 +433,20 @@ impl PlicApp {
             .as_deref()
             .filter(known)
             .or(self.last_folder.as_deref().filter(known))
+            .or(self.default_destination())
             .or(self.folders.first().map(|path| path.as_path()))
+    }
+
+    /// The subfolder named in the settings, if it exists.
+    fn default_destination(&self) -> Option<&Path> {
+        let name = crate::settings::get().default_destination;
+        if name.is_empty() {
+            return None;
+        }
+        self.folders
+            .iter()
+            .find(|path| display_name(path) == name.as_str())
+            .map(PathBuf::as_path)
     }
 
     /// Sets the start or end field to the playhead.
