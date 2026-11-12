@@ -52,6 +52,10 @@ impl ExportJob {
         &self.request.source
     }
 
+    pub fn output(&self) -> &Path {
+        &self.request.output
+    }
+
     fn is_running(&self) -> bool {
         self.progress.is_some()
     }
@@ -70,8 +74,19 @@ impl PlicApp {
         };
         self.editor.export_error = None;
         let index = self.selected.expect("export_requests needs a selection");
-        self.clips[index].status = ClipStatus::Exporting;
+        self.queue_export(index, requests);
+        self.start_jobs(window, cx);
 
+        // Keep going with whatever still needs editing.
+        if let Some(next) = self.next_pending_after(index) {
+            self.select(next, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Adds the exports of one clip to the queue as one batch.
+    pub(super) fn queue_export(&mut self, index: usize, requests: Vec<ExportRequest>) {
+        self.clips[index].status = ClipStatus::Exporting;
         self.next_job_id += 1;
         let batch = self.next_job_id;
         for request in requests {
@@ -86,24 +101,33 @@ impl PlicApp {
                 progress: None,
             });
         }
-        self.start_jobs(window, cx);
+    }
 
-        // Keep going with whatever still needs editing.
-        if let Some(next) = self.next_pending_after(index) {
-            self.select(next, window, cx);
-        }
-        cx.notify();
+    /// The selected clip's exports, named and placed as the panel says.
+    fn export_requests(&self, cx: &App) -> Result<Vec<ExportRequest>, SharedString> {
+        let index = self.selected.ok_or("Select a clip to export")?;
+        let entry = &self.clips[index];
+        let folder = self
+            .destination(entry)
+            .ok_or("Create a destination folder first")?;
+        self.export_requests_for(index, self.editor.name(cx), folder, &[])
     }
 
     /// One request for the whole clip, or one per segment when they are
-    /// saved as separate files.
-    fn export_requests(&self, cx: &App) -> Result<Vec<ExportRequest>, SharedString> {
-        let entry = self.current().ok_or("Select a clip to export")?;
+    /// saved as separate files, named `name` in `folder`. Outputs in
+    /// `reserved` count as taken.
+    pub(super) fn export_requests_for(
+        &self,
+        index: usize,
+        name: String,
+        folder: &Path,
+        reserved: &[PathBuf],
+    ) -> Result<Vec<ExportRequest>, SharedString> {
+        let entry = self.clips.get(index).ok_or("Select a clip to export")?;
         if entry.status == ClipStatus::Exporting {
             return Err("This clip is already being exported".into());
         }
         let info = entry.info().ok_or("This clip has not been read yet")?;
-        let name = self.editor.name(cx);
         library::validate_file_stem(&name).map_err(|error| error.to_string())?;
         entry.segments.validate(info.duration)?;
         if let Some(target) = self.editor.video.target_size
@@ -113,10 +137,6 @@ impl PlicApp {
             ffmpeg::target_bitrates(target, length, !entry.export_tracks().is_empty())
                 .map_err(|error| format!("{error:#}"))?;
         }
-        let folder = self
-            .destination(entry)
-            .ok_or("Create a destination folder first")?;
-
         let parts: Vec<(String, Vec<_>)> = if entry.segments.len() == 1 || self.editor.join {
             vec![(name, entry.segments.in_order())]
         } else {
@@ -142,8 +162,9 @@ impl PlicApp {
             .map(|(name, ranges)| {
                 let extension = self.editor.format.extension();
                 let output = folder.join(format!("{name}.{extension}"));
-                let taken =
-                    output.exists() || self.jobs.iter().any(|job| job.request.output == output);
+                let taken = output.exists()
+                    || reserved.contains(&output)
+                    || self.jobs.iter().any(|job| job.request.output == output);
                 if taken {
                     return Err(format!(
                         "{} already has a clip called {name}",
@@ -205,7 +226,7 @@ impl PlicApp {
     /// Starts queued exports, oldest first, while the limits allow. One
     /// that has to wait does not hold back later ones that fit, so copies
     /// slip past a busy encoder.
-    fn start_jobs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn start_jobs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let limits = Limits::for_machine(self.parallel_exports);
         let mut running: Vec<Workload> = self
             .jobs
@@ -289,6 +310,8 @@ impl PlicApp {
         }
         match result {
             Ok(output) if batch_done && !batch_failed => {
+                // Nothing is left to finish on this clip.
+                crate::drafts::forget(&job.request.source);
                 self.archive_exported(job, output, window, cx)
             }
             Ok(output) => {
@@ -367,6 +390,10 @@ impl PlicApp {
                             )
                         });
                         window.push_notification(Notification::success(message).title(title), cx);
+                        this.history.record(super::history::Change::Archive {
+                            original: source.clone(),
+                            archived: archived.clone(),
+                        });
                         if let Some(index) = index {
                             let entry = this.take_clip(index, window, cx);
                             this.settle(entry, archived);

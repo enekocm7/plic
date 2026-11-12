@@ -107,10 +107,13 @@ impl AudioOutput {
 
     /// Starts decoding the audio of `path` from `from`. The new session
     /// replaces any previous one and stays silent until [`AudioSession::set_playing`].
-    pub fn start(&mut self, path: &Path, from: Duration) -> Result<AudioSession> {
+    ///
+    /// At a `speed` other than 1 the sound is time-stretched, keeping its
+    /// pitch.
+    pub fn start(&mut self, path: &Path, from: Duration, speed: f64) -> Result<AudioSession> {
         let capacity = (self.sample_rate as f64 * self.channels as f64 * BUFFER_SECONDS) as usize;
         let (producer, consumer) = RingBuffer::new(capacity);
-        let feeder = Feeder::spawn(path, from, self.sample_rate, self.channels, producer)?;
+        let feeder = Feeder::spawn(path, from, speed, self.sample_rate, self.channels, producer)?;
 
         self.next_session += 1;
         let id = self.next_session;
@@ -135,6 +138,7 @@ impl AudioOutput {
             feeder,
             id,
             from,
+            speed,
             sample_rate: self.sample_rate,
         })
     }
@@ -146,6 +150,8 @@ pub struct AudioSession {
     feeder: Feeder,
     id: u64,
     from: Duration,
+    /// Media seconds per second of sound played.
+    speed: f64,
     sample_rate: u32,
 }
 
@@ -159,7 +165,7 @@ impl AudioSession {
         let frames = self.shared.played_frames.load(Ordering::Relaxed);
         let played = Duration::from_secs_f64(frames as f64 / self.sample_rate as f64);
         let latency = Duration::from_micros(self.shared.latency_us.load(Ordering::Relaxed));
-        self.from + played.saturating_sub(latency)
+        self.from + played.saturating_sub(latency).mul_f64(self.speed)
     }
 
     /// True once enough audio is decoded to start without an audible gap.
@@ -272,17 +278,24 @@ impl Feeder {
     fn spawn(
         path: &Path,
         from: Duration,
+        speed: f64,
         sample_rate: u32,
         channels: u16,
         producer: Producer<f32>,
     ) -> Result<Self> {
-        let mut child = crate::ffmpeg::command(crate::ffmpeg::Tool::Ffmpeg)
+        let mut command = crate::ffmpeg::command(crate::ffmpeg::Tool::Ffmpeg);
+        command
             .args(["-hide_banner", "-loglevel", "error", "-nostdin"])
             .arg("-ss")
             .arg(seconds_arg(from))
             .arg("-i")
             .arg(path)
-            .args(["-vn", "-sn", "-ac"])
+            .args(["-vn", "-sn"]);
+        if (speed - 1.0).abs() > f64::EPSILON {
+            command.arg("-af").arg(format!("atempo={speed:.3}"));
+        }
+        let mut child = command
+            .arg("-ac")
             .arg(channels.to_string())
             .arg("-ar")
             .arg(sample_rate.to_string())

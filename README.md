@@ -38,6 +38,11 @@ current directory the first time. The arrow next to **Open folder** lists
 recent folders. The window size and position, volume and theme are
 remembered too, in `state.json` next to `settings.json`.
 
+Unfinished work survives a restart: each clip's segments, export name and
+destination are kept in `drafts.json` in plic's data folder (`%APPDATA%\plic`
+on Windows), never next to the recordings, and are dropped once the clip
+has been exported. A recording replaced by a different file starts fresh.
+
 You can also drop a folder onto the window to open it, or a video file to open
 its folder with that clip selected. Dropped files are never moved.
 
@@ -45,6 +50,13 @@ its folder with that clip selected. Dropped files are never moved.
 2. Trim it by dragging the yellow handles on the timeline, by pressing
    `I` and `O` at the playhead, or by typing the times in the export panel.
 3. Name it, choose the destination folder, and press `Ctrl+Enter`.
+
+Ctrl-click clips to pick several, Shift-click to pick a run of them, or
+press `Ctrl+A` for every clip the list shows. A bar over the list then
+exports them all (`Ctrl+Enter`) with the export panel's format and the
+selected clip's destination, naming each with the name template or its own
+name; moves them into another folder; or deletes them (`Delete`). `Escape`
+goes back to a single clip.
 
 To keep several parts of one recording, press `N` (or **Add segment at the
 playhead**) to start another segment, and trim it like the first. Click a
@@ -83,9 +95,23 @@ Press `Ctrl+Shift+S` (or the camera button above the viewer) to save the
 frame under the playhead as a full-resolution PNG, or `Ctrl+Alt+S` for a
 JPEG. It lands in the clip's destination folder as `name-01m12s345.png`.
 
+`Ctrl+Z` undoes the last trim change (a whole drag counts as one), delete
+or move of an original into `edited/`; `Ctrl+Y` or `Ctrl+Shift+Z` redoes
+it. Deleted clips come back out of the Recycle Bin. The arrows in the title
+bar do the same and say what they will undo.
+
 Finished exports stay listed under the queue: copy one to the clipboard
 as a file (paste it straight into Discord or Explorer) or show it in its
 folder. `Ctrl+Shift+C` copies the latest one.
+
+Zoom the timeline with the mouse wheel (around the pointer) or `=` and `-`
+(around the playhead) to trim long recordings precisely; `0` shows the
+whole clip again. Shift with the wheel scrolls along it, the view follows
+the playhead, and once frames are far enough apart each one gets a tick.
+The speed button next to the loop toggle plays at 0.5x, 1x, 1.5x or 2x;
+the sound keeps its pitch. `J`, `K` and `L` work as a shuttle: `L` plays
+forward and each further press goes faster, `J` plays backward the same
+way, and `K` stops. The arrow keys still jump by the seek step.
 
 Hovering the timeline shows a small preview of the frame under the
 pointer. Filmstrips of the last few clips are kept, so flipping back to
@@ -149,3 +175,16 @@ A **name template** in the settings pre-fills export names, e.g.
 `{folder}-{date}-{n}`. `{name}` is the clip's own name, `{folder}` the clips
 folder, `{date}` the day it was recorded, and `{n}` counts up past names that
 already exist in the destination.
+
+Every keyboard shortcut can be changed under **Key bindings** in the same
+dialog. In `settings.json` only the changed ones are stored, by command name,
+each with a list of keys; an empty list unbinds a command:
+
+```json
+"key_bindings": {
+  "toggle_play": ["space", "p"],
+  "delete_clip": []
+}
+```
+
+The shortcuts reference (`?`) always shows the keys in effect.

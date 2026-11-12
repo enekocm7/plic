@@ -1,6 +1,7 @@
 //! User settings, stored as JSON in the app config directory.
 
 use std::{
+    collections::BTreeMap,
     fs,
     path::PathBuf,
     sync::{OnceLock, RwLock},
@@ -30,6 +31,9 @@ pub struct Settings {
     /// Folder holding `ffmpeg` and `ffprobe` to use instead of plic's own
     /// copy. Empty uses plic's copy.
     pub ffmpeg_folder: String,
+    /// Keys for commands, by command name, replacing the default keys.
+    /// Commands left out keep their defaults; an empty list unbinds one.
+    pub key_bindings: BTreeMap<String, Vec<String>>,
 }
 
 impl Default for Settings {
@@ -40,6 +44,7 @@ impl Default for Settings {
             default_destination: String::new(),
             name_template: String::new(),
             ffmpeg_folder: String::new(),
+            key_bindings: BTreeMap::new(),
         }
     }
 }
@@ -126,6 +131,7 @@ mod tests {
             default_destination: "  Best  ".into(),
             name_template: String::new(),
             ffmpeg_folder: String::new(),
+            key_bindings: BTreeMap::new(),
         }
         .sanitized();
         assert_eq!(settings.seek_step_secs, 1);

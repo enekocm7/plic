@@ -6,7 +6,12 @@ use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::*;
 
-use super::app::PlicApp;
+use std::collections::BTreeMap;
+
+use super::{
+    app::PlicApp,
+    keymap::{self, Command},
+};
 use crate::{library, settings::Settings};
 
 impl PlicApp {
@@ -37,18 +42,32 @@ impl PlicApp {
                 .default_value(current.ffmpeg_folder.clone())
                 .placeholder("plic's own copy")
         });
+        // One field per command, holding its keys separated by commas.
+        let keys: Vec<(&'static Command, Entity<InputState>)> = keymap::COMMANDS
+            .iter()
+            .map(|command| {
+                let current = keymap::keys_for(command, &current.key_bindings).join(", ");
+                let input = cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .default_value(current)
+                        .placeholder("none")
+                });
+                (command, input)
+            })
+            .collect();
         let focus = seek.read(cx).focus_handle(cx);
         window.defer(cx, move |window, cx| focus.focus(window, cx));
 
         let this = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, _, cx| {
-            let (this, seek, archive, destination, template, ffmpeg) = (
+            let (this, seek, archive, destination, template, ffmpeg, keys) = (
                 this.clone(),
                 seek.clone(),
                 archive.clone(),
                 destination.clone(),
                 template.clone(),
                 ffmpeg.clone(),
+                keys.clone(),
             );
             let muted = cx.theme().muted_foreground;
             let field = |label: &'static str, hint: &'static str, input: &Entity<InputState>| {
@@ -58,9 +77,47 @@ impl PlicApp {
                     .child(Input::new(input).small())
                     .child(div().text_xs().text_color(muted).child(hint))
             };
+            let key_rows = keys.iter().map(|(command, input)| {
+                h_flex()
+                    .gap_3()
+                    .child(div().flex_1().min_w_0().text_sm().truncate().child(command.description))
+                    .child(div().w(px(170.)).flex_none().child(Input::new(input).small()))
+            });
+            let key_list = v_flex()
+                .gap_2()
+                .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("Key bindings"))
+                .child(div().text_xs().text_color(muted).child(
+                    "Separate alternative keys with commas, e.g. space, k. Use ctrl-, shift- and alt- for modifiers. Leave a field empty to unbind it.",
+                ))
+                .child(
+                    v_flex()
+                        .id("settings-keys")
+                        .gap_1()
+                        .max_h(px(220.))
+                        .overflow_y_scroll()
+                        .pr_2()
+                        .children(key_rows),
+                )
+                .child(
+                    Button::new("settings-keys-reset")
+                        .ghost()
+                        .small()
+                        .label("Restore default keys")
+                        .on_click({
+                            let keys = keys.clone();
+                            move |_, window, cx| {
+                                for (command, input) in &keys {
+                                    let defaults = command.defaults.join(", ");
+                                    input.update(cx, |input, cx| {
+                                        input.set_value(defaults, window, cx)
+                                    });
+                                }
+                            }
+                        }),
+                );
             dialog
                 .title("Settings")
-                .w(px(420.))
+                .w(px(480.))
                 .child(
                     v_flex()
                         .gap_4()
@@ -88,7 +145,8 @@ impl PlicApp {
                             "ffmpeg folder",
                             "A folder with your own ffmpeg and ffprobe, used instead of the copy plic downloads. Empty uses plic's copy.",
                             &ffmpeg,
-                        )),
+                        ))
+                        .child(key_list),
                 )
                 .footer(
                     h_flex()
@@ -123,6 +181,33 @@ impl PlicApp {
                                         );
                                         return;
                                     }
+                                    let mut key_bindings = BTreeMap::new();
+                                    for (command, input) in &keys {
+                                        let typed: Vec<String> = input
+                                            .read(cx)
+                                            .value()
+                                            .split(',')
+                                            .map(str::to_owned)
+                                            .collect();
+                                        let cleaned = match keymap::clean_keys(&typed) {
+                                            Ok(cleaned) => cleaned,
+                                            Err(key) => {
+                                                window.push_notification(
+                                                    Notification::error(format!(
+                                                        "{}: \"{key}\" is not a key",
+                                                        command.description
+                                                    )),
+                                                    cx,
+                                                );
+                                                return;
+                                            }
+                                        };
+                                        // Only changes are saved, so new
+                                        // defaults still reach everyone else.
+                                        if cleaned != command.defaults {
+                                            key_bindings.insert(command.id.to_owned(), cleaned);
+                                        }
+                                    }
                                     let settings = Settings {
                                         seek_step_secs,
                                         archive_folder,
@@ -132,6 +217,7 @@ impl PlicApp {
                                             .to_string(),
                                         name_template: template.read(cx).value().to_string(),
                                         ffmpeg_folder: ffmpeg.read(cx).value().to_string(),
+                                        key_bindings,
                                     };
                                     if let Err(error) = crate::settings::update(settings) {
                                         window.push_notification(
@@ -141,6 +227,7 @@ impl PlicApp {
                                             cx,
                                         );
                                     }
+                                    keymap::apply(cx);
                                     // Clearing the folder may call for plic's own copy.
                                     this.update(cx, |this, cx| {
                                         this.set_up_ffmpeg(window, cx);

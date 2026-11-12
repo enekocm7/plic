@@ -146,6 +146,9 @@ impl PlicApp {
                     )),
             )
             .child(self.render_filter_bar(cx))
+            .when(self.has_batch(), |panel| {
+                panel.child(self.render_batch_bar(cx))
+            })
             .map(|panel| {
                 if !show_clips {
                     return panel.child(div().flex_1());
@@ -326,7 +329,8 @@ impl PlicApp {
             .filter_map(|row| {
                 let index = *rows.get(row)?;
                 let entry = entries.get(index)?;
-                let selected = selected_index == Some(index);
+                let selected = selected_index == Some(index)
+                    || matches!(list, List::Clips) && self.is_marked(index);
                 let row = h_flex()
                     .id((id, index))
                     .size_full()
@@ -336,10 +340,12 @@ impl PlicApp {
                     .cursor_pointer()
                     .when(selected, |row| row.bg(theme.sidebar_accent))
                     .when(!selected, |row| row.hover(|row| row.bg(theme.list_hover)))
-                    .on_click(cx.listener(move |this, _, window, cx| match list {
-                        List::Clips => this.select(index, window, cx),
-                        List::Settled => this.select_settled(index, window, cx),
-                    }))
+                    .on_click(
+                        cx.listener(move |this, event: &ClickEvent, window, cx| match list {
+                            List::Clips => this.click_clip(index, event.modifiers(), window, cx),
+                            List::Settled => this.select_settled(index, window, cx),
+                        }),
+                    )
                     .child(render_thumbnail(entry, &theme))
                     .child(
                         v_flex()

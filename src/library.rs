@@ -162,10 +162,75 @@ pub fn restore_original(archived: &Path) -> Result<PathBuf> {
     Ok(destination)
 }
 
+/// Moves a clip into `folder`, keeping its name. Fails rather than
+/// overwrite a file of the same name.
+pub fn move_into(source: &Path, folder: &Path) -> Result<PathBuf> {
+    let name = source.file_name().context("clip has no file name")?;
+    let destination = folder.join(name);
+    if destination.exists() {
+        bail!("{} already exists", destination.display());
+    }
+    fs::rename(source, &destination)
+        .or_else(|_| {
+            // Another drive: copy, then remove the original.
+            fs::copy(source, &destination)?;
+            fs::remove_file(source)
+        })
+        .with_context(|| {
+            format!(
+                "could not move {} to {}",
+                display_name(source),
+                folder.display()
+            )
+        })?;
+    Ok(destination)
+}
+
 /// Sends a clip to the recycle bin / trash so a mistaken delete can be undone.
 pub fn trash_clip(path: &Path) -> Result<()> {
     trash::delete(path)
         .with_context(|| format!("could not move {} to the trash", display_name(path)))
+}
+
+/// Takes the most recently deleted file that was at `path` back out of the
+/// recycle bin / trash.
+#[cfg(any(
+    target_os = "windows",
+    all(
+        unix,
+        not(target_os = "macos"),
+        not(target_os = "ios"),
+        not(target_os = "android")
+    )
+))]
+pub fn restore_from_trash(path: &Path) -> Result<()> {
+    let item = trash::os_limited::list()
+        .context("could not read the recycle bin")?
+        .into_iter()
+        .filter(|item| item.original_path() == path)
+        .max_by_key(|item| item.time_deleted)
+        .with_context(|| format!("{} is no longer in the recycle bin", display_name(path)))?;
+    if path.exists() {
+        bail!("{} already exists", path.display());
+    }
+    trash::os_limited::restore_all([item])
+        .with_context(|| format!("could not restore {}", display_name(path)))
+}
+
+#[cfg(not(any(
+    target_os = "windows",
+    all(
+        unix,
+        not(target_os = "macos"),
+        not(target_os = "ios"),
+        not(target_os = "android")
+    )
+)))]
+pub fn restore_from_trash(path: &Path) -> Result<()> {
+    bail!(
+        "restore {} from the Trash in Finder; plic cannot do it on this system",
+        display_name(path)
+    )
 }
 
 /// Runs a file operation, retrying for a moment while it fails. On Windows a
@@ -292,6 +357,22 @@ mod tests {
         assert_eq!(library.clips.len(), 1);
         assert!(library.settled.is_empty());
 
+        fs::remove_dir_all(&root)?;
+        Ok(())
+    }
+
+    /// Uses the real recycle bin, so it only runs when asked for.
+    #[test]
+    #[ignore]
+    fn restores_trashed_clips() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("plic-trash-{}", std::process::id()));
+        fs::create_dir_all(&root)?;
+        let clip = root.join("trashed.mp4");
+        fs::write(&clip, b"video")?;
+        trash_clip(&clip)?;
+        assert!(!clip.exists());
+        restore_from_trash(&clip)?;
+        assert_eq!(fs::read(&clip)?, b"video");
         fs::remove_dir_all(&root)?;
         Ok(())
     }
