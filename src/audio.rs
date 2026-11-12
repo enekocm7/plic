@@ -8,7 +8,7 @@
 use std::{
     io::Read,
     path::Path,
-    process::{Child, Stdio},
+    process::{Child, Command, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
@@ -261,6 +261,39 @@ fn fill_output<T: SizedSample + FromSample<f32>>(
     output[written..].fill(silence);
 }
 
+/// The ffmpeg command that decodes `path` from `from` to raw `f32le`
+/// samples on stdout, ready to spawn.
+pub(crate) fn feeder_command(
+    path: &Path,
+    from: Duration,
+    speed: f64,
+    sample_rate: u32,
+    channels: u16,
+) -> Command {
+    let mut command = crate::ffmpeg::command(crate::ffmpeg::Tool::Ffmpeg);
+    command
+        .args(["-hide_banner", "-loglevel", "error", "-nostdin"])
+        .arg("-ss")
+        .arg(seconds_arg(from))
+        .arg("-i")
+        .arg(path)
+        .args(["-vn", "-sn"]);
+    if (speed - 1.0).abs() > f64::EPSILON {
+        command.arg("-af").arg(format!("atempo={speed:.3}"));
+    }
+    command
+        .arg("-ac")
+        .arg(channels.to_string())
+        .arg("-ar")
+        .arg(sample_rate.to_string())
+        .args(["-f", "f32le", "pipe:1"])
+        .no_window()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    command
+}
+
 /// Runs ffmpeg and pushes its decoded samples into the ring buffer.
 struct Feeder {
     child: Option<Child>,
@@ -283,27 +316,7 @@ impl Feeder {
         channels: u16,
         producer: Producer<f32>,
     ) -> Result<Self> {
-        let mut command = crate::ffmpeg::command(crate::ffmpeg::Tool::Ffmpeg);
-        command
-            .args(["-hide_banner", "-loglevel", "error", "-nostdin"])
-            .arg("-ss")
-            .arg(seconds_arg(from))
-            .arg("-i")
-            .arg(path)
-            .args(["-vn", "-sn"]);
-        if (speed - 1.0).abs() > f64::EPSILON {
-            command.arg("-af").arg(format!("atempo={speed:.3}"));
-        }
-        let mut child = command
-            .arg("-ac")
-            .arg(channels.to_string())
-            .arg("-ar")
-            .arg(sample_rate.to_string())
-            .args(["-f", "f32le", "pipe:1"])
-            .no_window()
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+        let mut child = feeder_command(path, from, speed, sample_rate, channels)
             .spawn()
             .context("could not start ffmpeg for audio")?;
         let stdout = child.stdout.take().context("ffmpeg has no stdout")?;

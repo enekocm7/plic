@@ -192,9 +192,22 @@ pub struct VideoStream {
 
 impl VideoStream {
     pub fn spawn(path: &Path, start: Duration, size: FrameSize, frame_rate: f64) -> Result<Self> {
+        Self::spawn_with(path, start, size, frame_rate, true)
+    }
+
+    /// [`spawn`](Self::spawn), choosing whether ffmpeg may decode on the GPU.
+    pub fn spawn_with(
+        path: &Path,
+        start: Duration,
+        size: FrameSize,
+        frame_rate: f64,
+        hwaccel: bool,
+    ) -> Result<Self> {
         let mut command = base_command();
+        if hwaccel {
+            command.args(["-hwaccel", "auto"]);
+        }
         command
-            .args(["-hwaccel", "auto"])
             .arg("-ss")
             .arg(seconds_arg(start))
             .arg("-i")
