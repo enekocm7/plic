@@ -293,6 +293,14 @@ pub fn plan(encoding: VideoEncoding, bitrate: Option<u64>) -> EncodePlan {
     }
 }
 
+/// Whether exports in `codec` encode on the GPU, or `None` when its
+/// encoders have not been probed yet. Never probes, so it is cheap.
+pub fn uses_hardware(codec: Codec) -> Option<bool> {
+    CHOSEN[codec.index()]
+        .get()
+        .map(|encoder| matches!(encoder.family, Family::Amf | Family::Nvenc | Family::Qsv))
+}
+
 /// Probes `codec`'s encoders on a background thread so the next export in
 /// that codec does not pay for it.
 pub fn warm_up(codec: Codec) {

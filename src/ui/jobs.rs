@@ -1,6 +1,6 @@
-//! The export queue. Exports run one at a time in the background so a
-//! hardware encoder is never asked for more sessions than it has; the user
-//! moves on to the next clip as soon as one is queued.
+//! The export queue. Exports run in the background, several at once within
+//! the limits of [`crate::scheduler`], while the user moves on to the next
+//! clip as soon as one is queued.
 //!
 //! A clip whose segments are saved as separate files queues one job per
 //! segment. Its original is only archived once every one of them succeeded.
@@ -9,9 +9,11 @@ use std::path::{Path, PathBuf};
 
 use futures::StreamExt as _;
 use gpui_kit::assets::IconName;
+use gpui_kit::component::Selectable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::progress::Progress;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -20,6 +22,7 @@ use super::app::{ClipStatus, PlicApp};
 use crate::{
     ffmpeg::{self, CancelToken, ExportError, ExportRequest},
     library,
+    scheduler::{self, Limits, Workload},
 };
 
 pub struct ExportJob {
@@ -29,6 +32,7 @@ pub struct ExportJob {
     request: ExportRequest,
     label: SharedString,
     cancel: CancelToken,
+    workload: Workload,
     /// `None` while waiting for an earlier export to finish.
     progress: Option<f32>,
 }
@@ -76,12 +80,13 @@ impl PlicApp {
                 id: self.next_job_id,
                 batch,
                 label: library::display_name(&request.output).into(),
+                workload: request.workload(),
                 request,
                 cancel: CancelToken::default(),
                 progress: None,
             });
         }
-        self.start_next_job(window, cx);
+        self.start_jobs(window, cx);
 
         // Keep going with whatever still needs editing.
         if let Some(next) = self.next_pending_after(index) {
@@ -185,14 +190,40 @@ impl PlicApp {
         after.or_else(|| self.clips[..index].iter().position(|entry| pending(&entry)))
     }
 
-    /// Starts the oldest queued export unless one is already running.
-    fn start_next_job(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.jobs.iter().any(ExportJob::is_running) {
-            return;
+    /// Sets how many encodes may run at once and starts any that now can.
+    pub(super) fn set_parallel_exports(
+        &mut self,
+        count: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.parallel_exports = count;
+        self.start_jobs(window, cx);
+        cx.notify();
+    }
+
+    /// Starts queued exports, oldest first, while the limits allow. One
+    /// that has to wait does not hold back later ones that fit, so copies
+    /// slip past a busy encoder.
+    fn start_jobs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let limits = Limits::for_machine(self.parallel_exports);
+        let mut running: Vec<Workload> = self
+            .jobs
+            .iter()
+            .filter(|job| job.is_running())
+            .map(|job| job.workload)
+            .collect();
+        for index in 0..self.jobs.len() {
+            let job = &self.jobs[index];
+            if !job.is_running() && limits.allows(&running, job.workload) {
+                running.push(job.workload);
+                self.start_job(index, window, cx);
+            }
         }
-        let Some(job) = self.jobs.first_mut() else {
-            return;
-        };
+    }
+
+    fn start_job(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let job = &mut self.jobs[index];
         job.progress = Some(0.0);
         let (id, request, cancel) = (job.id, job.request.clone(), job.cancel.clone());
 
@@ -296,7 +327,7 @@ impl PlicApp {
         {
             self.clips[index].status = ClipStatus::Pending;
         }
-        self.start_next_job(window, cx);
+        self.start_jobs(window, cx);
         cx.notify();
     }
 
@@ -378,7 +409,7 @@ impl PlicApp {
         if let Some(index) = self.index_of(&job.request.source) {
             self.clips[index].status = ClipStatus::Pending;
         }
-        self.start_next_job(window, cx);
+        self.start_jobs(window, cx);
         cx.notify();
     }
 
@@ -413,13 +444,18 @@ impl PlicApp {
                 .border_t_1()
                 .border_color(theme.sidebar_border)
                 .child(
-                    h_flex().h(px(36.)).px_4().justify_between().child(
-                        div()
-                            .text_xs()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.muted_foreground)
-                            .child(format!("QUEUE · {}", self.jobs.len())),
-                    ),
+                    h_flex()
+                        .h(px(36.))
+                        .px_4()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme.muted_foreground)
+                                .child(format!("QUEUE · {}", self.jobs.len())),
+                        )
+                        .child(self.render_parallel(cx)),
                 )
                 .child(
                     v_flex()
@@ -440,6 +476,35 @@ impl PlicApp {
                         ),
                 )
         })
+    }
+
+    /// The "encodes at once" choice.
+    fn render_parallel(&self, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        h_flex()
+            .id("parallel-exports")
+            .gap_0p5()
+            .tooltip(|window, cx| {
+                Tooltip::new("Exports that encode at once. Lossless copies always run alongside.")
+                    .build(window, cx)
+            })
+            .child(
+                div()
+                    .mr_1()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child("At once"),
+            )
+            .children((1..=scheduler::MAX_ENCODES).map(|count| {
+                Button::new(("parallel", count))
+                    .ghost()
+                    .xsmall()
+                    .label(count.to_string())
+                    .selected(self.parallel_exports == count)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.set_parallel_exports(count, window, cx)
+                    }))
+            }))
     }
 
     fn render_finished(&self, finished: &FinishedExport, cx: &Context<Self>) -> impl IntoElement {
