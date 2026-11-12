@@ -1,11 +1,6 @@
 //! Audio peaks for drawing a clip's waveform along the timeline.
 
-use std::{
-    io::Read as _,
-    path::Path,
-    process::{Command, Stdio},
-    time::Duration,
-};
+use std::{io::Read as _, path::Path, process::Stdio, time::Duration};
 
 use anyhow::{Context, Result, bail};
 
@@ -22,7 +17,7 @@ const NOISE_FLOOR: f32 = 0.02;
 /// scaled so the loudest slice is 1. Every audio track is mixed in, so a
 /// voice on a separate microphone track shows too.
 pub fn peaks(path: &Path, duration: Duration, tracks: usize) -> Result<Vec<f32>> {
-    let mut command = Command::new("ffmpeg");
+    let mut command = crate::ffmpeg::command(crate::ffmpeg::Tool::Ffmpeg);
     command
         .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
         .arg(path);
@@ -168,7 +163,7 @@ mod tests {
         let dir = std::env::temp_dir().join("plic-waveform-test");
         std::fs::create_dir_all(&dir).unwrap();
         let clip = dir.join("tone.mp4");
-        let status = Command::new("ffmpeg")
+        let status = crate::ffmpeg::command(crate::ffmpeg::Tool::Ffmpeg)
             .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i"])
             .arg("sine=frequency=440:duration=2")
             .args(["-af", "volume='if(lt(t,1),1,0)':eval=frame", "-c:a", "aac"])

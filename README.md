@@ -12,8 +12,17 @@ Built with [GPUI](https://www.gpui.rs) through gpui-kit and its
 
 ## Requirements
 
-`ffmpeg` and `ffprobe` must be on `PATH`. They decode the preview and
-encode the exports. Exports are H.264, HEVC or AV1 at a Small, Balanced
+plic decodes the preview and encodes the exports with `ffmpeg` and
+`ffprobe`, and looks after them itself. On Windows, the first run downloads
+a known build (ffmpeg 9.0.2, Gyan Doshi's essentials build) into
+`%LOCALAPPDATA%\plic\ffmpeg`, checks it against a pinned SHA-256 and uses
+it from then on; a banner shows the progress and offers a retry if the
+download fails. Nothing has to be put on `PATH`. To use your own build, set
+**ffmpeg folder** in the settings to the folder holding `ffmpeg` and
+`ffprobe`. On other systems, and until the download has finished, plic uses
+the ones on `PATH`.
+
+Exports are H.264, HEVC or AV1 at a Small, Balanced
 or High quality preset. Each codec uses the first hardware encoder that
 works (AMF, NVENC or Quick Sync) and falls back to `libx264`, `libx265`
 or `libsvtav1`/`libaom-av1`.

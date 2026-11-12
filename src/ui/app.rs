@@ -24,6 +24,7 @@ use super::{
     ToggleFullscreen, ToggleLoop, ToggleMarker, ToggleMute, TogglePlay, ToggleTheme, TrimToMarkers,
     clip_filter::ClipFilter,
     editor::Editor,
+    ffmpeg_setup::Setup,
     frame_image,
     jobs::{ExportJob, FinishedExport},
     player::{Player, PlayerEvent},
@@ -176,6 +177,8 @@ pub struct PlicApp {
     /// GitHub is asked on its own thread so a slow network never delays the
     /// UI.
     pub(super) updates_worker: WorkerPool,
+    /// Downloading plic's own copy of ffmpeg.
+    pub(super) ffmpeg: Setup,
 }
 
 impl PlicApp {
@@ -221,7 +224,9 @@ impl PlicApp {
             update: None,
             checking_update: false,
             updates_worker: WorkerPool::new("update", 1),
+            ffmpeg: Setup::Idle,
         };
+        app.set_up_ffmpeg(window, cx);
         if let Some(folder) = folder {
             app.load_folder(folder, window, cx);
         }
@@ -854,6 +859,11 @@ impl PlicApp {
     }
 
     fn reload(&mut self, _: &Reload, window: &mut Window, cx: &mut Context<Self>) {
+        self.reload_folder(window, cx);
+    }
+
+    /// Scans the folder again, keeping the clip in view selected.
+    pub(super) fn reload_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(folder) = self.folder.clone() {
             let viewed = self.viewed().map(|entry| entry.file.path.clone());
             self.load_folder(folder, window, cx);
@@ -1152,6 +1162,7 @@ impl Render for PlicApp {
             }))
             .when(!self.fullscreen, |this| {
                 this.child(self.render_title_bar(cx))
+                    .children(self.render_ffmpeg_banner(cx))
                     .when(self.update.is_some(), |this| {
                         this.child(self.render_update_banner(cx))
                     })

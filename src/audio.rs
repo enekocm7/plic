@@ -8,7 +8,7 @@
 use std::{
     io::Read,
     path::Path,
-    process::{Child, Command, Stdio},
+    process::{Child, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
@@ -276,7 +276,7 @@ impl Feeder {
         channels: u16,
         producer: Producer<f32>,
     ) -> Result<Self> {
-        let mut child = Command::new("ffmpeg")
+        let mut child = crate::ffmpeg::command(crate::ffmpeg::Tool::Ffmpeg)
             .args(["-hide_banner", "-loglevel", "error", "-nostdin"])
             .arg("-ss")
             .arg(seconds_arg(from))
