@@ -118,3 +118,11 @@ iscc /DAppVersion=0.8.0 installer\plic.iss
 ```
 
 The installer lands in `target/dist/`.
+
+## Settings
+
+Press `Ctrl+,` (or the gear in the title bar) to change the seek step, the
+name of the folder originals move to after export (`edited` by default) and
+the default destination folder. They are saved as `settings.json` in the
+`plic` folder of your OS config directory (`%APPDATA%` on Windows) and can
+also be edited there by hand.

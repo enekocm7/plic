@@ -8,6 +8,7 @@ mod frame_image;
 mod jobs;
 mod library_panel;
 mod player;
+mod settings_panel;
 mod shortcuts;
 mod timeline;
 mod volume;
@@ -59,6 +60,7 @@ actions!(
         Reload,
         ToggleTheme,
         ShowShortcuts,
+        ShowSettings,
         Quit,
     ]
 );
@@ -98,6 +100,7 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("?", ShowShortcuts, shortcuts),
         KeyBinding::new("f11", ToggleFullscreen, Some(CONTEXT)),
         KeyBinding::new("f1", ShowShortcuts, Some(CONTEXT)),
+        KeyBinding::new("ctrl-,", ShowSettings, Some(CONTEXT)),
         // Works from inside the editor's text fields too.
         KeyBinding::new("ctrl-enter", ExportClip, Some(CONTEXT)),
         KeyBinding::new("ctrl-shift-s", SaveFrame, Some(CONTEXT)),

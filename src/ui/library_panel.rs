@@ -260,7 +260,7 @@ impl PlicApp {
                 format!(
                     "Videos saved directly in this folder show up here. \
                      Originals move to the \"{}\" folder once exported.",
-                    library::EDITED_DIR
+                    library::edited_dir()
                 )
                 .into(),
             ),

@@ -5193,6 +5193,7 @@ dependencies = [
  "anyhow",
  "clipboard-win",
  "cpal",
+ "dirs 6.0.0",
  "futures",
  "gpui-kit",
  "image",

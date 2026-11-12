@@ -19,7 +19,7 @@ use super::{
     AddSegment, CONTEXT, CopyLastExport, DeleteClip, ExitFullscreen, ExportClip, JumpToEnd,
     JumpToIn, JumpToOut, JumpToStart, MarkIn, MarkOut, NextMarker, OpenFolder, PreviousMarker,
     Reload, ResetTrim, SaveFrame, SaveFrameJpeg, SeekBackward, SeekForward, SelectNextClip,
-    SelectPreviousClip, ShowShortcuts, SplitAtPlayhead, StepBackward, StepForward,
+    SelectPreviousClip, ShowSettings, ShowShortcuts, SplitAtPlayhead, StepBackward, StepForward,
     ToggleFullscreen, ToggleLoop, ToggleMarker, ToggleMute, TogglePlay, ToggleTheme, TrimToMarkers,
     clip_filter::ClipFilter,
     editor::Editor,
@@ -36,14 +36,11 @@ use crate::{
     worker::WorkerPool,
 };
 
-/// How far the arrow keys move the playhead, in milliseconds.
-const SEEK_STEP_MS: i64 = 5_000;
-
-/// Thumbnails are decoded at twice their on-screen size for HiDPI displays.
 /// How long the folder must stay quiet before it is rescanned, so
 /// recordings that are still being written are not listed early.
 const WATCH_SETTLE: Duration = Duration::from_secs(2);
 
+/// Thumbnails are decoded at twice their on-screen size for HiDPI displays.
 const THUMBNAIL_SIZE: FrameSize = FrameSize::new(160, 90);
 
 /// Metadata that is loaded in the background after the folder is listed.
@@ -689,12 +686,12 @@ impl PlicApp {
 
     fn seek_backward(&mut self, _: &SeekBackward, window: &mut Window, cx: &mut Context<Self>) {
         self.player
-            .update(cx, |player, cx| player.seek_by(-SEEK_STEP_MS, window, cx));
+            .update(cx, |player, cx| player.seek_by(-seek_step_ms(), window, cx));
     }
 
     fn seek_forward(&mut self, _: &SeekForward, window: &mut Window, cx: &mut Context<Self>) {
         self.player
-            .update(cx, |player, cx| player.seek_by(SEEK_STEP_MS, window, cx));
+            .update(cx, |player, cx| player.seek_by(seek_step_ms(), window, cx));
     }
 
     fn step_backward(&mut self, _: &StepBackward, window: &mut Window, cx: &mut Context<Self>) {
@@ -844,6 +841,10 @@ impl PlicApp {
                 }
             }
         }
+    }
+
+    fn show_settings(&mut self, _: &ShowSettings, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_settings(window, cx);
     }
 
     fn show_shortcuts(&mut self, _: &ShowShortcuts, window: &mut Window, cx: &mut Context<Self>) {
@@ -1007,6 +1008,16 @@ impl PlicApp {
                                 })),
                         )
                         .child(
+                            Button::new("settings")
+                                .ghost()
+                                .small()
+                                .icon(IconName::Settings)
+                                .tooltip("Settings (Ctrl+,)")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.show_settings(&ShowSettings, window, cx)
+                                })),
+                        )
+                        .child(
                             Button::new("theme")
                                 .ghost()
                                 .small()
@@ -1071,6 +1082,7 @@ impl Render for PlicApp {
             .on_action(cx.listener(Self::export_clip))
             .on_action(cx.listener(Self::delete_clip))
             .on_action(cx.listener(Self::show_shortcuts))
+            .on_action(cx.listener(Self::show_settings))
             .on_drop(cx.listener(|this, dropped: &ExternalPaths, window, cx| {
                 this.handle_drop(dropped, window, cx)
             }))
@@ -1105,6 +1117,11 @@ impl Render for PlicApp {
                     ),
             )
     }
+}
+
+/// How far the arrow keys move the playhead, in milliseconds.
+fn seek_step_ms() -> i64 {
+    i64::from(crate::settings::get().seek_step_secs) * 1_000
 }
 
 pub(super) fn display_name(path: &Path) -> SharedString {
