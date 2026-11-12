@@ -22,6 +22,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: release
+          # A tag run can only read caches from its own tag or master, so a
+          # cache saved here would never be used again. warm-cache.yml keeps
+          # the master cache that releases restore.
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Check the tag matches Cargo.toml
         id: version

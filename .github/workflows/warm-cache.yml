@@ -1,0 +1,46 @@
+name: Warm the release cache
+
+# Release runs are triggered by tags, and a tag run can only restore caches
+# saved by that tag or by master. This builds the release profile on master
+# whenever the dependencies change, so the next release starts with compiled
+# dependencies instead of building them all from scratch.
+on:
+  push:
+    branches: [master]
+    paths:
+      - Cargo.lock
+      - Cargo.toml
+      - build.rs
+      - .github/workflows/warm-cache.yml
+      - .github/workflows/release.yml
+  # Run by hand after a new stable Rust, which changes the cache key.
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  warm:
+    name: Build dependencies
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Must match the cache settings in release.yml so the keys line up.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+
+      # Only the dependencies are cached (rust-cache drops plic's own build
+      # output), so swap in an empty main: cargo still builds every
+      # dependency, but skips the slow optimise-and-link of the real app.
+      # Dependency builds don't depend on plic's source, so the release
+      # build reuses them as they are.
+      - name: Stub out plic
+        shell: bash
+        run: echo 'fn main() {}' > src/main.rs
+
+      - name: Build dependencies
+        run: cargo build --release --locked
