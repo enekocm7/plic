@@ -24,7 +24,7 @@ use cpal::{
 };
 use rtrb::{Consumer, Producer, RingBuffer};
 
-use crate::ffmpeg::{CommandExt as _, seconds_arg};
+use crate::ffmpeg::{CommandExt as _, Timing, seconds_arg};
 
 /// Decoded audio buffered ahead of the device: about a second, enough to
 /// ride out a busy moment without delaying seeks.
@@ -110,10 +110,24 @@ impl AudioOutput {
     ///
     /// At a `speed` other than 1 the sound is time-stretched, keeping its
     /// pitch.
-    pub fn start(&mut self, path: &Path, from: Duration, speed: f64) -> Result<AudioSession> {
+    pub fn start(
+        &mut self,
+        path: &Path,
+        from: Duration,
+        speed: f64,
+        timing: Timing,
+    ) -> Result<AudioSession> {
         let capacity = (self.sample_rate as f64 * self.channels as f64 * BUFFER_SECONDS) as usize;
         let (producer, consumer) = RingBuffer::new(capacity);
-        let feeder = Feeder::spawn(path, from, speed, self.sample_rate, self.channels, producer)?;
+        let feeder = Feeder::spawn(
+            path,
+            from,
+            speed,
+            timing,
+            self.sample_rate,
+            self.channels,
+            producer,
+        )?;
 
         self.next_session += 1;
         let id = self.next_session;
@@ -263,25 +277,35 @@ fn fill_output<T: SizedSample + FromSample<f32>>(
 
 /// The ffmpeg command that decodes `path` from `from` to raw `f32le`
 /// samples on stdout, ready to spawn.
+///
+/// The first sample is exactly the one at `from`: ffmpeg keeps the
+/// container's own timestamps (`-copyts`), and `aresample` fills the start
+/// with silence when the audio begins after `from`, or trims it when it
+/// begins before. Without that, a recording whose audio starts a little
+/// after its video would play early by the difference.
 pub(crate) fn feeder_command(
     path: &Path,
     from: Duration,
     speed: f64,
+    timing: Timing,
     sample_rate: u32,
     channels: u16,
 ) -> Command {
+    let first_sample = (timing.container_time(from) * f64::from(sample_rate)).round() as i64;
+    let mut filters = format!("aresample=async=1:first_pts={first_sample}");
+    if (speed - 1.0).abs() > f64::EPSILON {
+        filters.push_str(&format!(",atempo={speed:.3}"));
+    }
     let mut command = crate::ffmpeg::command(crate::ffmpeg::Tool::Ffmpeg);
     command
         .args(["-hide_banner", "-loglevel", "error", "-nostdin"])
         .arg("-ss")
         .arg(seconds_arg(from))
+        .arg("-copyts")
         .arg("-i")
         .arg(path)
-        .args(["-vn", "-sn"]);
-    if (speed - 1.0).abs() > f64::EPSILON {
-        command.arg("-af").arg(format!("atempo={speed:.3}"));
-    }
-    command
+        .args(["-vn", "-sn", "-af"])
+        .arg(filters)
         .arg("-ac")
         .arg(channels.to_string())
         .arg("-ar")
@@ -312,11 +336,12 @@ impl Feeder {
         path: &Path,
         from: Duration,
         speed: f64,
+        timing: Timing,
         sample_rate: u32,
         channels: u16,
         producer: Producer<f32>,
     ) -> Result<Self> {
-        let mut child = feeder_command(path, from, speed, sample_rate, channels)
+        let mut child = feeder_command(path, from, speed, timing, sample_rate, channels)
             .spawn()
             .context("could not start ffmpeg for audio")?;
         let stdout = child.stdout.take().context("ffmpeg has no stdout")?;
@@ -390,4 +415,60 @@ fn feed(mut stdout: impl Read, mut producer: Producer<f32>, channels: u16, state
         }
     }
     state.done.store(true, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn arguments(command: &Command) -> Vec<String> {
+        command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn decodes_from_the_container_timestamp_of_the_start() {
+        let timing = Timing {
+            origin: 0.5,
+            ..Timing::default()
+        };
+        let command = feeder_command(
+            Path::new("clip.mp4"),
+            Duration::from_millis(2_500),
+            1.0,
+            timing,
+            48_000,
+            2,
+        );
+        let arguments = arguments(&command);
+        let position = |flag: &str| arguments.iter().position(|arg| arg == flag).unwrap();
+        assert_eq!(arguments[position("-ss") + 1], "2.500");
+        assert!(arguments.contains(&"-copyts".to_string()));
+        // 3.0 seconds on the container clock, in samples.
+        assert_eq!(
+            arguments[position("-af") + 1],
+            "aresample=async=1:first_pts=144000"
+        );
+
+        let fast = feeder_command(
+            Path::new("clip.mp4"),
+            Duration::ZERO,
+            1.5,
+            timing,
+            44_100,
+            2,
+        );
+        assert_eq!(
+            arguments_of(&fast, "-af"),
+            "aresample=async=1:first_pts=22050,atempo=1.500"
+        );
+    }
+
+    fn arguments_of(command: &Command, flag: &str) -> String {
+        let arguments = arguments(command);
+        let at = arguments.iter().position(|arg| arg == flag).unwrap();
+        arguments[at + 1].clone()
+    }
 }

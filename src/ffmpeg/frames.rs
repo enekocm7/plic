@@ -11,7 +11,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 
-use super::{CommandExt as _, seconds_arg};
+use super::{CommandExt as _, Timing, seconds_arg};
 
 /// Pixel dimensions of a frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -182,7 +182,12 @@ const QUEUE_DEPTH: usize = 6;
 /// A running ffmpeg process decoding frames from `start` onwards.
 ///
 /// Frames are delivered at a constant `frame_rate`, so frame `n` is shown at
-/// `start + n / frame_rate`. Dropping the stream stops ffmpeg.
+/// `first + n / frame_rate`, where `first` is the time of the first frame the
+/// source has at or after `start`. The frames carry the clip's own
+/// timestamps: ffmpeg keeps the container's clock (`-copyts`) and is told
+/// where the output grid starts, so a clip whose video starts late, or
+/// whose frames do not fall on whole milliseconds, still lines up with the
+/// audio decoded for the same time. Dropping the stream stops ffmpeg.
 pub struct VideoStream {
     child: Option<Child>,
     frames: Receiver<RawFrame>,
@@ -191,8 +196,14 @@ pub struct VideoStream {
 }
 
 impl VideoStream {
-    pub fn spawn(path: &Path, start: Duration, size: FrameSize, frame_rate: f64) -> Result<Self> {
-        Self::spawn_with(path, start, size, frame_rate, true)
+    pub fn spawn(
+        path: &Path,
+        start: Duration,
+        size: FrameSize,
+        frame_rate: f64,
+        timing: Timing,
+    ) -> Result<Self> {
+        Self::spawn_with(path, start, size, frame_rate, timing, true)
     }
 
     /// [`spawn`](Self::spawn), choosing whether ffmpeg may decode on the GPU.
@@ -201,8 +212,10 @@ impl VideoStream {
         start: Duration,
         size: FrameSize,
         frame_rate: f64,
+        timing: Timing,
         hwaccel: bool,
     ) -> Result<Self> {
+        let first = timing.first_frame(start);
         let mut command = base_command();
         if hwaccel {
             command.args(["-hwaccel", "auto"]);
@@ -210,11 +223,13 @@ impl VideoStream {
         command
             .arg("-ss")
             .arg(seconds_arg(start))
+            .arg("-copyts")
             .arg("-i")
             .arg(path)
             .args(["-an", "-sn", "-vf"])
             .arg(format!(
-                "fps={frame_rate:.6},{}",
+                "fps={frame_rate:.6}:start_time={:.6},{}",
+                timing.origin + first.as_secs_f64(),
                 scale_filter(size, "fast_bilinear")
             ))
             .args(["-pix_fmt", "bgra", "-f", "rawvideo", "pipe:1"])
@@ -231,7 +246,7 @@ impl VideoStream {
         let path: PathBuf = path.to_owned();
         thread::Builder::new()
             .name(format!("decode {}", path.display()))
-            .spawn(move || read_frames(stdout, sender, size, start, frame_rate))
+            .spawn(move || read_frames(stdout, sender, size, first, frame_rate))
             .context("could not start the decoder thread")?;
 
         Ok(Self {

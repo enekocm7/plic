@@ -9,7 +9,7 @@ use anyhow::Result;
 
 use crate::{
     audio::{AudioOutput, AudioSession},
-    ffmpeg::{FrameSize, RawFrame, VideoStream},
+    ffmpeg::{FrameSize, RawFrame, Timing, VideoStream},
 };
 
 /// Playback never decodes faster than this; higher rates only cost CPU.
@@ -86,15 +86,16 @@ impl Playback {
         size: FrameSize,
         frame_rate: f64,
         speed: f64,
+        timing: Timing,
         audio: Option<&mut AudioOutput>,
     ) -> Result<Self> {
         let speed = speed.clamp(MIN_SPEED, MAX_SPEED);
         // Faster playback shows more media frames per second; decode fewer
         // so the display rate stays within bounds.
         let frame_rate = frame_rate.clamp(1.0, MAX_FRAME_RATE / speed.max(1.0));
-        let video = VideoStream::spawn(path, from, size, frame_rate)?;
+        let video = VideoStream::spawn(path, from, size, frame_rate, timing)?;
         // A clip whose audio cannot be decoded still plays, silently.
-        let audio = audio.and_then(|output| output.start(path, from, speed).ok());
+        let audio = audio.and_then(|output| output.start(path, from, speed, timing).ok());
         Ok(Self {
             video,
             pending: None,

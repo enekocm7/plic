@@ -399,6 +399,7 @@ impl Player {
             size,
             source.frame_rate(),
             self.speed,
+            source.info.timing(),
             audio,
         );
         self.apply_volume();

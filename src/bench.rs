@@ -34,8 +34,8 @@ use crate::{
     audio::feeder_command,
     ffmpeg::{
         self, Animation, AudioAdjust, CancelToken, CommandExt as _, ExportMode, ExportRequest,
-        Format, FrameSize, MediaInfo, OutputLimits, RawFrame, Tool, Transform, VideoEncoding,
-        VideoStream,
+        Format, FrameSize, MediaInfo, OutputLimits, RawFrame, Timing, Tool, Transform,
+        VideoEncoding, VideoStream,
     },
     trim::TrimRange,
 };
@@ -461,9 +461,9 @@ fn wait_for_frame(stream: &mut VideoStream) -> Option<RawFrame> {
 
 /// Times of the first frame of every flash that `VideoStream` delivers
 /// between `from` and `from + window`, as stamped by the player pipeline.
-fn video_flashes(path: &Path, from: f64, window: f64, rate: f64) -> Vec<f64> {
+fn video_flashes(path: &Path, from: f64, window: f64, rate: f64, timing: Timing) -> Vec<f64> {
     let size = FrameSize::new(160, 90);
-    let mut stream = VideoStream::spawn(path, secs(from), size, rate).unwrap();
+    let mut stream = VideoStream::spawn(path, secs(from), size, rate, timing).unwrap();
     let mut flashes = Vec::new();
     let mut lit = false;
     while let Some(frame) = wait_for_frame(&mut stream) {
@@ -516,8 +516,8 @@ impl Onsets {
 
 /// Times of every beep in the first `window` seconds of what the player's
 /// audio decoder produces when asked to start at `from`.
-fn audio_beeps(path: &Path, from: f64, window: f64) -> Vec<f64> {
-    let mut child = feeder_command(path, secs(from), 1.0, SAMPLE_RATE, 2)
+fn audio_beeps(path: &Path, from: f64, window: f64, timing: Timing) -> Vec<f64> {
+    let mut child = feeder_command(path, secs(from), 1.0, timing, SAMPLE_RATE, 2)
         .spawn()
         .unwrap();
     let mut stdout = child.stdout.take().unwrap();
@@ -643,17 +643,24 @@ fn bench_scrub_step() {
 fn bench_playback_start() {
     let mut report = Report::new("playback_start");
     for (name, path) in video_fixtures() {
-        let rate = play_rate(&info_of(&path));
-        drop(VideoStream::spawn(&path, Duration::ZERO, VIEW, rate).unwrap());
+        let info = info_of(&path);
+        let (rate, timing) = (play_rate(&info), info.timing());
+        drop(VideoStream::spawn(&path, Duration::ZERO, VIEW, rate, timing).unwrap());
         // The start of the clip, and a point well inside a group of pictures.
         for at in [0.0, 12.3] {
             for hwaccel in [true, false] {
                 let runs = (0..7)
                     .map(|_| {
                         time(|| {
-                            let mut stream =
-                                VideoStream::spawn_with(&path, secs(at), VIEW, rate, hwaccel)
-                                    .unwrap();
+                            let mut stream = VideoStream::spawn_with(
+                                &path,
+                                secs(at),
+                                VIEW,
+                                rate,
+                                timing,
+                                hwaccel,
+                            )
+                            .unwrap();
                             wait_for_frame(&mut stream).unwrap()
                         })
                         .0
@@ -671,9 +678,10 @@ fn bench_playback_start() {
             let runs = (0..7)
                 .map(|_| {
                     time(|| {
-                        let mut child = feeder_command(&path, secs(at), 1.0, SAMPLE_RATE, 2)
-                            .spawn()
-                            .unwrap();
+                        let mut child =
+                            feeder_command(&path, secs(at), 1.0, timing, SAMPLE_RATE, 2)
+                                .spawn()
+                                .unwrap();
                         let mut stdout = child.stdout.take().unwrap();
                         let mut buffer = vec![0u8; (SAMPLE_RATE as usize / 20) * 8];
                         stdout.read_exact(&mut buffer).unwrap();
@@ -694,12 +702,14 @@ fn bench_playback_start() {
 fn bench_decode_throughput() {
     let mut report = Report::new("decode_throughput");
     for (name, path) in video_fixtures() {
-        let rate = play_rate(&info_of(&path));
+        let info = info_of(&path);
+        let (rate, timing) = (play_rate(&info), info.timing());
         for hwaccel in [true, false] {
             let runs = (0..3)
                 .map(|_| {
                     let mut stream =
-                        VideoStream::spawn_with(&path, secs(10.0), VIEW, rate, hwaccel).unwrap();
+                        VideoStream::spawn_with(&path, secs(10.0), VIEW, rate, timing, hwaccel)
+                            .unwrap();
                     let first = wait_for_frame(&mut stream).unwrap();
                     let started = Instant::now();
                     let mut frames = 0u32;
@@ -726,8 +736,9 @@ fn bench_decode_throughput() {
 fn sync_case(report: &mut Report, label: &str, fixture: &Fixture, from: f64, window: f64) {
     let info = info_of(&fixture.path);
     let rate = play_rate(&info);
-    let flashes = video_flashes(&fixture.path, from, window, rate);
-    let beeps = audio_beeps(&fixture.path, from, window);
+    let timing = info.timing();
+    let flashes = video_flashes(&fixture.path, from, window, rate, timing);
+    let beeps = audio_beeps(&fixture.path, from, window, timing);
 
     let video_error = worst_error(fixture.marks, &flashes);
     let audio_error = worst_error(fixture.marks, &beeps);
