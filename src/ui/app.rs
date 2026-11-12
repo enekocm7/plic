@@ -16,10 +16,11 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use super::{
-    AddSegment, CONTEXT, CopyLastExport, DeleteClip, ExportClip, JumpToEnd, JumpToIn, JumpToOut,
-    JumpToStart, MarkIn, MarkOut, OpenFolder, Reload, ResetTrim, SaveFrame, SaveFrameJpeg,
-    SeekBackward, SeekForward, SelectNextClip, SelectPreviousClip, ShowShortcuts, SplitAtPlayhead,
-    StepBackward, StepForward, ToggleLoop, ToggleMute, TogglePlay, ToggleTheme,
+    AddSegment, CONTEXT, CopyLastExport, DeleteClip, ExitFullscreen, ExportClip, JumpToEnd,
+    JumpToIn, JumpToOut, JumpToStart, MarkIn, MarkOut, OpenFolder, Reload, ResetTrim, SaveFrame,
+    SaveFrameJpeg, SeekBackward, SeekForward, SelectNextClip, SelectPreviousClip, ShowShortcuts,
+    SplitAtPlayhead, StepBackward, StepForward, ToggleFullscreen, ToggleLoop, ToggleMute,
+    TogglePlay, ToggleTheme,
     editor::Editor,
     frame_image,
     jobs::{ExportJob, FinishedExport},
@@ -118,6 +119,8 @@ impl ClipEntry {
 
 pub struct PlicApp {
     pub(super) focus: FocusHandle,
+    /// The viewer fills the window, hiding everything else.
+    fullscreen: bool,
     pub(super) player: Entity<Player>,
     pub(super) editor: Editor,
     /// The clips folder.
@@ -169,6 +172,7 @@ impl PlicApp {
             .detach();
         let mut app = Self {
             focus,
+            fullscreen: false,
             player,
             editor: Editor::new(window, cx),
             folder: None,
@@ -586,6 +590,37 @@ impl PlicApp {
         self.player.update(cx, |player, cx| player.toggle_mute(cx));
     }
 
+    fn toggle_fullscreen(
+        &mut self,
+        _: &ToggleFullscreen,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_fullscreen(!self.fullscreen, window, cx);
+    }
+
+    fn exit_fullscreen(&mut self, _: &ExitFullscreen, window: &mut Window, cx: &mut Context<Self>) {
+        if self.fullscreen {
+            self.set_fullscreen(false, window, cx);
+        } else {
+            cx.propagate();
+        }
+    }
+
+    fn set_fullscreen(&mut self, fullscreen: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.fullscreen == fullscreen {
+            return;
+        }
+        self.fullscreen = fullscreen;
+        if window.is_fullscreen() != fullscreen {
+            window.toggle_fullscreen();
+        }
+        self.player
+            .update(cx, |player, cx| player.set_fullscreen(fullscreen, cx));
+        self.focus.focus(window, cx);
+        cx.notify();
+    }
+
     fn jump_to_start(&mut self, _: &JumpToStart, window: &mut Window, cx: &mut Context<Self>) {
         self.player
             .update(cx, |player, cx| player.seek(Duration::ZERO, window, cx));
@@ -825,6 +860,8 @@ impl Render for PlicApp {
             .on_action(cx.listener(Self::jump_to_start))
             .on_action(cx.listener(Self::jump_to_end))
             .on_action(cx.listener(Self::toggle_mute))
+            .on_action(cx.listener(Self::toggle_fullscreen))
+            .on_action(cx.listener(Self::exit_fullscreen))
             .on_action(cx.listener(Self::mark_in))
             .on_action(cx.listener(Self::mark_out))
             .on_action(cx.listener(Self::reset_trim))
@@ -839,12 +876,14 @@ impl Render for PlicApp {
             .on_action(cx.listener(Self::export_clip))
             .on_action(cx.listener(Self::delete_clip))
             .on_action(cx.listener(Self::show_shortcuts))
-            .child(self.render_title_bar(cx))
+            .when(!self.fullscreen, |this| {
+                this.child(self.render_title_bar(cx))
+            })
             .child(
                 h_flex()
                     .flex_1()
                     .min_h_0()
-                    .child(self.render_library(cx))
+                    .when(!self.fullscreen, |row| row.child(self.render_library(cx)))
                     .child(
                         v_flex()
                             .flex_1()
@@ -856,15 +895,16 @@ impl Render for PlicApp {
                                 MouseButton::Left,
                                 cx.listener(|this, _, window, cx| this.focus.focus(window, cx)),
                             )
-                            .when(self.viewed().is_some(), |column| {
+                            .when(self.viewed().is_some() && !self.fullscreen, |column| {
                                 column.child(self.render_clip_header(cx))
                             })
                             .child(div().flex_1().min_h_0().child(self.player.clone())),
                     )
                     // Kept while exports run, so their progress stays visible.
-                    .when(self.current().is_some() || !self.jobs.is_empty(), |row| {
-                        row.child(self.render_export_panel(cx))
-                    }),
+                    .when(
+                        !self.fullscreen && (self.current().is_some() || !self.jobs.is_empty()),
+                        |row| row.child(self.render_export_panel(cx)),
+                    ),
             )
     }
 }
