@@ -33,6 +33,16 @@ pub struct ExportJob {
     progress: Option<f32>,
 }
 
+/// How many finished exports the queue keeps listed.
+const FINISHED_KEPT: usize = 5;
+
+/// An export that produced a file, listed under the queue.
+pub struct FinishedExport {
+    id: u64,
+    label: SharedString,
+    pub path: PathBuf,
+}
+
 impl ExportJob {
     pub fn source(&self) -> &Path {
         &self.request.source
@@ -235,6 +245,17 @@ impl PlicApp {
             self.failed_batches.contains(&job.batch)
         };
 
+        if let Ok(output) = &result {
+            self.finished.insert(
+                0,
+                FinishedExport {
+                    id: job.id,
+                    label: job.label.clone(),
+                    path: output.clone(),
+                },
+            );
+            self.finished.truncate(FINISHED_KEPT);
+        }
         match result {
             Ok(output) if batch_done && !batch_failed => {
                 self.archive_exported(job, output, window, cx)
@@ -361,9 +382,31 @@ impl PlicApp {
         cx.notify();
     }
 
+    /// Puts an exported file on the clipboard.
+    pub(super) fn copy_export(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        let name = library::display_name(path);
+        match crate::clipboard::copy_file(path) {
+            Ok(()) => window.push_notification(
+                Notification::success("Paste it into a chat or a folder")
+                    .title(format!("Copied {name}")),
+                cx,
+            ),
+            Err(error) => window.push_notification(
+                Notification::error(format!("{error:#}")).title("Could not copy the file"),
+                cx,
+            ),
+        }
+    }
+
+    fn dismiss_finished(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.finished.retain(|finished| finished.id != id);
+        cx.notify();
+    }
+
     pub(super) fn render_queue(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        v_flex().when(!self.jobs.is_empty(), |queue| {
+        let busy = !self.jobs.is_empty() || !self.finished.is_empty();
+        v_flex().when(busy, |queue| {
             queue
                 .flex_none()
                 .max_h(px(260.))
@@ -385,9 +428,78 @@ impl PlicApp {
                         .px_2()
                         .pb_2()
                         .gap_1()
-                        .children(self.jobs.iter().map(|job| self.render_job(job, cx))),
+                        .children(
+                            self.jobs
+                                .iter()
+                                .map(|job| self.render_job(job, cx).into_any_element()),
+                        )
+                        .children(
+                            self.finished.iter().map(|finished| {
+                                self.render_finished(finished, cx).into_any_element()
+                            }),
+                        ),
                 )
         })
+    }
+
+    fn render_finished(&self, finished: &FinishedExport, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let id = finished.id;
+        let path = finished.path.clone();
+        h_flex()
+            .p_2()
+            .gap_2()
+            .rounded(theme.radius)
+            .border_1()
+            .border_color(theme.border)
+            .child(
+                Icon::new(IconName::CircleCheck)
+                    .xsmall()
+                    .text_color(theme.success),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_sm()
+                    .truncate()
+                    .child(finished.label.clone()),
+            )
+            .child(
+                Button::new(("copy-export", id))
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Copy)
+                    .tooltip("Copy the file to the clipboard (Ctrl+Shift+C for the latest)")
+                    .on_click(cx.listener({
+                        let path = path.clone();
+                        move |this, _, window, cx| this.copy_export(&path, window, cx)
+                    })),
+            )
+            .child(
+                Button::new(("show-export", id))
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::FolderOpen)
+                    .tooltip("Show in folder")
+                    .on_click(cx.listener(move |_, _, window, cx| {
+                        if let Err(error) = library::show_in_file_manager(&path) {
+                            window.push_notification(
+                                Notification::error(format!("{error:#}"))
+                                    .title("Could not show the file"),
+                                cx,
+                            );
+                        }
+                    })),
+            )
+            .child(
+                Button::new(("dismiss-export", id))
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::X)
+                    .tooltip("Remove from the list")
+                    .on_click(cx.listener(move |this, _, _, cx| this.dismiss_finished(id, cx))),
+            )
     }
 
     fn render_job(&self, job: &ExportJob, cx: &Context<Self>) -> impl IntoElement {

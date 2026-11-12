@@ -68,6 +68,10 @@ Press `Ctrl+Shift+S` (or the camera button above the viewer) to save the
 frame under the playhead as a full-resolution PNG, or `Ctrl+Alt+S` for a
 JPEG. It lands in the clip's destination folder as `name-01m12s345.png`.
 
+Finished exports stay listed under the queue: copy one to the clipboard
+as a file (paste it straight into Discord or Explorer) or show it in its
+folder. `Ctrl+Shift+C` copies the latest one.
+
 Exports run in the background, one at a time, while plic moves on to the
 next clip. Press `?` to see every shortcut.
 

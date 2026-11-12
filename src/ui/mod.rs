@@ -45,6 +45,7 @@ actions!(
         JumpToOut,
         ExportClip,
         SaveFrame,
+        CopyLastExport,
         SaveFrameJpeg,
         DeleteClip,
         OpenFolder,
@@ -86,6 +87,7 @@ fn bind_keys(cx: &mut App) {
         // Works from inside the editor's text fields too.
         KeyBinding::new("ctrl-enter", ExportClip, Some(CONTEXT)),
         KeyBinding::new("ctrl-shift-s", SaveFrame, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-c", CopyLastExport, Some(CONTEXT)),
         KeyBinding::new("ctrl-alt-s", SaveFrameJpeg, Some(CONTEXT)),
         KeyBinding::new("ctrl-up", SelectPreviousClip, Some(CONTEXT)),
         KeyBinding::new("ctrl-down", SelectNextClip, Some(CONTEXT)),
