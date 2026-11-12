@@ -211,6 +211,8 @@ pub struct PlicApp {
     pub(super) update: Option<Update>,
     /// Whether an update check is in flight.
     pub(super) checking_update: bool,
+    /// Whether an update is being downloaded for installation.
+    pub(super) installing_update: bool,
     /// GitHub is asked on its own thread so a slow network never delays the
     /// UI.
     pub(super) updates_worker: WorkerPool,
@@ -270,6 +272,7 @@ impl PlicApp {
             finished: Vec::new(),
             update: None,
             checking_update: false,
+            installing_update: false,
             updates_worker: WorkerPool::new("update", 1),
             ffmpeg: Setup::Idle,
             history: History::default(),

@@ -4,10 +4,14 @@
 //! version the user dismissed, and when the last check ran, live in the
 //! state plic already keeps between runs.
 
+use std::fs;
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 /// The running version. The release workflow refuses a tag that does not
 /// match it, so this is also the version on the latest release page.
@@ -29,6 +33,17 @@ pub struct Update {
     /// The version without its leading `v`, e.g. `0.9.0`.
     pub version: String,
     /// The release page, which carries the notes and the downloads.
+    pub url: String,
+    /// The installer asset and the checksum list published next to it, when
+    /// the release carries them.
+    pub installer: Option<Download>,
+    pub checksums: Option<Download>,
+}
+
+/// A file attached to a release.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Download {
+    pub name: String,
     pub url: String,
 }
 
@@ -79,6 +94,8 @@ pub fn check() -> Result<Option<Update>> {
     Ok(Some(Update {
         version: version.to_string(),
         url: release.url(),
+        installer: release.asset(|name| name.ends_with("-setup.exe")),
+        checksums: release.asset(|name| name == "SHA256SUMS.txt"),
     }))
 }
 
@@ -93,9 +110,27 @@ struct Release {
     draft: bool,
     #[serde(default)]
     prerelease: bool,
+    #[serde(default)]
+    assets: Vec<Asset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Asset {
+    name: String,
+    browser_download_url: String,
 }
 
 impl Release {
+    fn asset(&self, matches: impl Fn(&str) -> bool) -> Option<Download> {
+        self.assets
+            .iter()
+            .find(|asset| matches(&asset.name))
+            .map(|asset| Download {
+                name: asset.name.clone(),
+                url: asset.browser_download_url.clone(),
+            })
+    }
+
     fn url(&self) -> String {
         self.html_url
             .clone()
@@ -158,6 +193,106 @@ fn parse_version(version: &str) -> Option<[u64; 3]> {
     Some([major, minor, patch])
 }
 
+/// Whether this copy was put in place by the installer, which leaves its
+/// uninstaller next to the executable. A portable copy has to be replaced
+/// by hand, because running the installer would add a second copy.
+pub fn is_installed() -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("unins000.exe")))
+        .is_some_and(|uninstaller| uninstaller.is_file())
+}
+
+/// Downloads the installer for `update`, checks it against the release's
+/// `SHA256SUMS.txt`, and returns where it was saved.
+pub fn download(update: &Update) -> Result<PathBuf> {
+    let (Some(installer), Some(checksums)) = (&update.installer, &update.checksums) else {
+        bail!("this release has no installer to download");
+    };
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(15)))
+        .user_agent(format!("plic/{CURRENT_VERSION}"))
+        .build()
+        .into();
+
+    let sums = agent
+        .get(&checksums.url)
+        .call()
+        .context("could not download the checksum list")?
+        .body_mut()
+        .read_to_string()
+        .context("could not read the checksum list")?;
+    let expected = expected_checksum(&sums, &installer.name)
+        .with_context(|| format!("no checksum is published for {}", installer.name))?;
+
+    let dir = std::env::temp_dir().join(format!("plic-update-{}", update.version));
+    fs::create_dir_all(&dir).context("could not create a folder for the download")?;
+    let path = dir.join(&installer.name);
+
+    let response = agent
+        .get(&installer.url)
+        .call()
+        .context("could not download the installer")?;
+    let mut body = response.into_body().into_reader();
+    let mut file = fs::File::create(&path).context("could not save the installer")?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0; 256 * 1024];
+    loop {
+        let read = match body.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error).context("the download was interrupted"),
+        };
+        hasher.update(&buffer[..read]);
+        file.write_all(&buffer[..read])
+            .context("could not save the installer")?;
+    }
+    file.flush().context("could not save the installer")?;
+    drop(file);
+
+    let digest: String = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    if digest != expected {
+        fs::remove_file(&path).ok();
+        bail!("the download is damaged or was changed (SHA-256 {digest}, expected {expected})");
+    }
+    Ok(path)
+}
+
+/// The hash listed for `name` in a `sha256sum`-style file.
+fn expected_checksum(sums: &str, name: &str) -> Option<String> {
+    sums.lines().find_map(|line| {
+        let (hash, file) = line.split_once(char::is_whitespace)?;
+        (file.trim().trim_start_matches('*') == name).then(|| hash.to_ascii_lowercase())
+    })
+}
+
+/// Starts the downloaded installer quietly. It closes plic if it is still
+/// running, replaces it in place and starts it again, so the caller should
+/// quit right after this returns.
+pub fn launch_installer(path: &Path) -> Result<()> {
+    let mut command = std::process::Command::new(path);
+    command.args([
+        "/SILENT",
+        "/SUPPRESSMSGBOXES",
+        "/NORESTART",
+        "/CLOSEAPPLICATIONS",
+        "/RELAUNCH=1",
+    ]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: outlive plic.
+        command.creation_flags(0x0000_0008 | 0x0000_0200);
+    }
+    command.spawn().context("could not start the installer")?;
+    Ok(())
+}
+
 fn unix_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -211,6 +346,31 @@ mod tests {
         let release: Release =
             serde_json::from_str(r#"{"tag_name":"v0.9.0"}"#).expect("valid release JSON");
         assert_eq!(release.url(), RELEASES_URL);
+    }
+
+    #[test]
+    fn finds_the_installer_and_checksums() {
+        let json = r#"{"tag_name":"v0.9.0","assets":[
+            {"name":"plic-0.9.0.zip","browser_download_url":"https://x/zip"},
+            {"name":"plic-0.9.0-setup.exe","browser_download_url":"https://x/setup"},
+            {"name":"SHA256SUMS.txt","browser_download_url":"https://x/sums"}]}"#;
+        let release: Release = serde_json::from_str(json).expect("valid release JSON");
+        assert_eq!(
+            release.asset(|n| n.ends_with("-setup.exe")).map(|d| d.url),
+            Some("https://x/setup".to_string())
+        );
+        assert!(release.asset(|n| n == "SHA256SUMS.txt").is_some());
+    }
+
+    #[test]
+    fn reads_checksums_from_a_sums_file() {
+        let sums = "ABC123  plic-0.9.0-setup.exe\r\nff00 *other.zip\n";
+        assert_eq!(
+            expected_checksum(sums, "plic-0.9.0-setup.exe").as_deref(),
+            Some("abc123")
+        );
+        assert_eq!(expected_checksum(sums, "other.zip").as_deref(), Some("ff00"));
+        assert_eq!(expected_checksum(sums, "missing.exe"), None);
     }
 
     #[test]

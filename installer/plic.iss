@@ -79,3 +79,12 @@ Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.m4v\shell\plic\comm
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
+; plic's built-in updater runs this installer silently with /RELAUNCH=1 and
+; expects the new version to start again.
+Filename: "{app}\{#AppExe}"; Flags: nowait; Check: RelaunchRequested
+
+[Code]
+function RelaunchRequested: Boolean;
+begin
+  Result := ExpandConstant('{param:RELAUNCH|0}') = '1';
+end;

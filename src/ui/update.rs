@@ -111,6 +111,52 @@ impl PlicApp {
         cx.notify();
     }
 
+    /// Downloads the installer, then hands over to it and quits so it can
+    /// replace the running executable. Copies the installer cannot update
+    /// (portable, or a release without an installer) get the release page.
+    fn install_update(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.installing_update {
+            return;
+        }
+        let Some(update) = self.update.clone() else {
+            return;
+        };
+        if update.installer.is_none() || update.checksums.is_none() || !updates::is_installed() {
+            self.open_release_page(&ClickEvent::default(), window, cx);
+            return;
+        }
+        self.installing_update = true;
+        cx.notify();
+
+        let job = self.updates_worker.run(move || updates::download(&update));
+        cx.spawn_in(window, async move |this, cx| {
+            let result = match job.await {
+                Ok(result) => result,
+                Err(_) => Err(anyhow::anyhow!("the download was cancelled")),
+            };
+            this.update_in(cx, |this, window, cx| {
+                match result.and_then(|path| updates::launch_installer(&path)) {
+                    Ok(()) => {
+                        crate::state::save();
+                        crate::drafts::save();
+                        cx.quit();
+                    }
+                    Err(error) => {
+                        this.installing_update = false;
+                        window.push_notification(
+                            Notification::error(format!("{error:#}"))
+                                .title("Could not install the update"),
+                            cx,
+                        );
+                        cx.notify();
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn open_release_page(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         let Some(url) = self.update.as_ref().map(|update| update.url.clone()) else {
             return;
@@ -161,7 +207,7 @@ impl PlicApp {
                             .text_xs()
                             .text_color(theme.muted_foreground)
                             .child(format!(
-                                "You are running {}. Open the release page to download it.",
+                                "You are running {}. It downloads and installs in the background, then plic restarts.",
                                 updates::CURRENT_VERSION
                             )),
                     ),
@@ -170,8 +216,13 @@ impl PlicApp {
                 Button::new("update-download")
                     .primary()
                     .small()
-                    .label("Get the update")
-                    .on_click(cx.listener(Self::open_release_page)),
+                    .label(if self.installing_update {
+                        "Downloading…"
+                    } else {
+                        "Install update"
+                    })
+                    .loading(self.installing_update)
+                    .on_click(cx.listener(Self::install_update)),
             )
             .child(
                 Button::new("update-dismiss")
