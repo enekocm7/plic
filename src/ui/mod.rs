@@ -5,6 +5,7 @@ mod batch;
 mod clip_actions;
 mod clip_filter;
 mod editor;
+mod ffmpeg_setup;
 mod frame_image;
 mod history;
 mod jobs;
@@ -84,8 +85,11 @@ pub fn run(folder: Option<PathBuf>) {
         .run(move |cx| {
             gpui_kit::init(cx);
             // Probing the hardware encoders takes a moment; do it before the
-            // first export needs it.
-            crate::ffmpeg::warm_up_encoder(crate::ffmpeg::Codec::default());
+            // first export needs it. Without ffmpeg yet, the probe waits for
+            // the download, or it would settle on the fallback encoder.
+            if !crate::ffmpeg::tools::needs_download() {
+                crate::ffmpeg::warm_up_encoder(crate::ffmpeg::Codec::default());
+            }
             // Video reads best on a dark surround, whatever the OS theme.
             let mode = if crate::state::get().dark_theme {
                 ThemeMode::Dark

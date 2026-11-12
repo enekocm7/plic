@@ -28,6 +28,9 @@ pub struct Settings {
     /// Template for export names, such as `{folder}-{date}-{n}`. Empty
     /// keeps the clip's own name. `{n}` counts up past names already used.
     pub name_template: String,
+    /// Folder holding `ffmpeg` and `ffprobe` to use instead of plic's own
+    /// copy. Empty uses plic's copy.
+    pub ffmpeg_folder: String,
     /// Keys for commands, by command name, replacing the default keys.
     /// Commands left out keep their defaults; an empty list unbinds one.
     pub key_bindings: BTreeMap<String, Vec<String>>,
@@ -40,6 +43,7 @@ impl Default for Settings {
             archive_folder: DEFAULT_ARCHIVE_FOLDER.to_owned(),
             default_destination: String::new(),
             name_template: String::new(),
+            ffmpeg_folder: String::new(),
             key_bindings: BTreeMap::new(),
         }
     }
@@ -55,6 +59,7 @@ impl Settings {
         }
         self.default_destination = self.default_destination.trim().to_owned();
         self.name_template = self.name_template.trim().to_owned();
+        self.ffmpeg_folder = self.ffmpeg_folder.trim().to_owned();
         self
     }
 }
@@ -125,6 +130,7 @@ mod tests {
             archive_folder: "a/b".into(),
             default_destination: "  Best  ".into(),
             name_template: String::new(),
+            ffmpeg_folder: String::new(),
             key_bindings: BTreeMap::new(),
         }
         .sanitized();

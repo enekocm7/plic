@@ -1,10 +1,6 @@
 //! Reading clip metadata with `ffprobe`.
 
-use std::{
-    path::Path,
-    process::{Command, Stdio},
-    time::Duration,
-};
+use std::{path::Path, process::Stdio, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -68,7 +64,7 @@ impl MediaInfo {
 }
 
 pub fn probe(path: &Path) -> Result<MediaInfo> {
-    let output = Command::new("ffprobe")
+    let output = crate::ffmpeg::command(crate::ffmpeg::Tool::Ffprobe)
         .args([
             "-v",
             "error",
@@ -98,7 +94,7 @@ pub fn keyframe_at_or_before(path: &Path, at: Duration) -> Result<Duration> {
     }
     // Seeking lands on the keyframe before the target, so the first packet
     // read after it is the one we want.
-    let output = Command::new("ffprobe")
+    let output = crate::ffmpeg::command(crate::ffmpeg::Tool::Ffprobe)
         .args(["-v", "error", "-select_streams", "v:0", "-read_intervals"])
         .arg(format!("{}%+#1", super::seconds_arg(at)))
         .args([

@@ -37,6 +37,11 @@ impl PlicApp {
                 .default_value(current.name_template.clone())
                 .placeholder("{name}")
         });
+        let ffmpeg = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(current.ffmpeg_folder.clone())
+                .placeholder("plic's own copy")
+        });
         // One field per command, holding its keys separated by commas.
         let keys: Vec<(&'static Command, Entity<InputState>)> = keymap::COMMANDS
             .iter()
@@ -55,12 +60,13 @@ impl PlicApp {
 
         let this = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, _, cx| {
-            let (this, seek, archive, destination, template, keys) = (
+            let (this, seek, archive, destination, template, ffmpeg, keys) = (
                 this.clone(),
                 seek.clone(),
                 archive.clone(),
                 destination.clone(),
                 template.clone(),
+                ffmpeg.clone(),
                 keys.clone(),
             );
             let muted = cx.theme().muted_foreground;
@@ -135,6 +141,11 @@ impl PlicApp {
                             "Pre-fills export names. Use {name}, {folder}, {date} and {n}, which counts up past names already used. Empty keeps the clip's name.",
                             &template,
                         ))
+                        .child(field(
+                            "ffmpeg folder",
+                            "A folder with your own ffmpeg and ffprobe, used instead of the copy plic downloads. Empty uses plic's copy.",
+                            &ffmpeg,
+                        ))
                         .child(key_list),
                 )
                 .footer(
@@ -205,6 +216,7 @@ impl PlicApp {
                                             .value()
                                             .to_string(),
                                         name_template: template.read(cx).value().to_string(),
+                                        ffmpeg_folder: ffmpeg.read(cx).value().to_string(),
                                         key_bindings,
                                     };
                                     if let Err(error) = crate::settings::update(settings) {
@@ -216,7 +228,12 @@ impl PlicApp {
                                         );
                                     }
                                     keymap::apply(cx);
-                                    this.update(cx, |_, cx| cx.notify()).ok();
+                                    // Clearing the folder may call for plic's own copy.
+                                    this.update(cx, |this, cx| {
+                                        this.set_up_ffmpeg(window, cx);
+                                        cx.notify()
+                                    })
+                                    .ok();
                                     window.close_dialog(cx);
                                 }),
                         ),

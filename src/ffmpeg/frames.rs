@@ -121,7 +121,7 @@ pub fn save_frame(path: &Path, at: Duration, output: &Path, format: ImageFormat)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()
-        .context("could not start ffmpeg; check that it is installed and on PATH")?;
+        .context("could not start ffmpeg; wait for its download to finish or set its folder in the settings")?;
     if !result.status.success() || !output.exists() {
         let stderr = String::from_utf8_lossy(&result.stderr);
         bail!("could not save the frame: {}", stderr.trim());
@@ -137,7 +137,7 @@ pub fn frame_file_stem(stem: &str, at: Duration) -> String {
 }
 
 fn base_command() -> Command {
-    let mut command = Command::new("ffmpeg");
+    let mut command = crate::ffmpeg::command(crate::ffmpeg::Tool::Ffmpeg);
     command.args(["-hide_banner", "-loglevel", "error", "-nostdin"]);
     command
 }
@@ -157,7 +157,7 @@ fn run_single_frame(
         .stdin(Stdio::null())
         .stderr(Stdio::piped())
         .output()
-        .context("could not start ffmpeg; check that it is installed and on PATH")?;
+        .context("could not start ffmpeg; wait for its download to finish or set its folder in the settings")?;
     if output.stdout.len() < size.byte_len() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("no frame at {}: {}", seconds_arg(at), stderr.trim());
@@ -211,7 +211,7 @@ impl VideoStream {
             .stderr(Stdio::null());
         let mut child = command
             .spawn()
-            .context("could not start ffmpeg; check that it is installed and on PATH")?;
+            .context("could not start ffmpeg; wait for its download to finish or set its folder in the settings")?;
         let stdout = child.stdout.take().context("ffmpeg has no stdout")?;
 
         let (sender, frames) = mpsc::sync_channel(QUEUE_DEPTH);
