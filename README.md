@@ -167,3 +167,8 @@ A **name template** in the settings pre-fills export names, e.g.
 `{folder}-{date}-{n}`. `{name}` is the clip's own name, `{folder}` the clips
 folder, `{date}` the day it was recorded, and `{n}` counts up past names that
 already exist in the destination.
+
+## License
+
+plic is free software under the GNU General Public License, version 3 —
+see [LICENSE](LICENSE).

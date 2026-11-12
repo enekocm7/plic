@@ -60,7 +60,7 @@ jobs:
 
           $portable = "$dist\plic-$version-windows-x64"
           New-Item -ItemType Directory -Force $portable | Out-Null
-          Copy-Item target\release\plic.exe, README.md $portable
+          Copy-Item target\release\plic.exe, README.md, LICENSE $portable
           Compress-Archive -Path "$portable\*" -DestinationPath "$portable.zip" -Force
           Remove-Item -Recurse $portable
 

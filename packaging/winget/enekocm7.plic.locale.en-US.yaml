@@ -8,7 +8,8 @@ PublisherUrl: https://github.com/enekocm7
 PublisherSupportUrl: https://github.com/enekocm7/plic/issues
 PackageName: plic
 PackageUrl: https://github.com/enekocm7/plic
-License: Proprietary
+License: GPL-3.0-only
+LicenseUrl: https://github.com/enekocm7/plic/blob/master/LICENSE
 ShortDescription: Watch, trim and file away video clips.
 Description: |-
   plic opens a folder of recordings, plays them back with sound, and lets you

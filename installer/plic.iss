@@ -20,6 +20,7 @@ AppVerName={#AppName} {#AppVersion}
 AppPublisher=enekocm7
 AppPublisherURL=https://github.com/enekocm7/plic
 AppSupportURL=https://github.com/enekocm7/plic/issues
+LicenseFile=..\LICENSE
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
@@ -43,6 +44,7 @@ Name: "contextmenu"; Description: "Add ""Open with plic"" to folders and videos 
 [Files]
 Source: "..\target\release\{#AppExe}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExe}"
