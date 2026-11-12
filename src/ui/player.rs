@@ -1336,9 +1336,11 @@ impl Player {
             }
         });
         cx.spawn(async move |this, cx| {
-            let Ok(frame) = job.await else {
-                return;
-            };
+            // A worker that died answers with an error like any failed decode,
+            // so the next request is never left waiting on `in_flight`.
+            let frame = job
+                .await
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("the decoder stopped")));
             this.update(cx, |this, cx| {
                 if this.generation != generation {
                     return;
