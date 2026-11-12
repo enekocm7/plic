@@ -17,8 +17,9 @@ const GROUPS: &[Group] = &[
         "Playback",
         &[
             (&["space", "k"], "Play or pause"),
-            (&["left", "j"], "Back 5 seconds"),
-            (&["right", "l"], "Forward 5 seconds"),
+            (&["j"], "Play backward; press again to go faster"),
+            (&["l"], "Play forward; press again to go faster"),
+            (&["left", "right"], "Back or forward by the seek step"),
             (&[",", "."], "Previous or next frame"),
             (&["home", "end"], "Start or end of the clip"),
             (&["m"], "Mute"),

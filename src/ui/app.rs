@@ -20,8 +20,9 @@ use super::{
     AddSegment, CONTEXT, CopyLastExport, DeleteClip, ExitFullscreen, ExportClip, JumpToEnd,
     JumpToIn, JumpToOut, JumpToStart, MarkIn, MarkOut, NextMarker, OpenFolder, PreviousMarker,
     Reload, ResetTrim, SaveFrame, SaveFrameJpeg, SeekBackward, SeekForward, SelectNextClip,
-    SelectPreviousClip, ShowSettings, ShowShortcuts, SplitAtPlayhead, StepBackward, StepForward,
-    ToggleFullscreen, ToggleLoop, ToggleMarker, ToggleMute, TogglePlay, ToggleTheme, TrimToMarkers,
+    SelectPreviousClip, ShowSettings, ShowShortcuts, ShuttleBackward, ShuttleForward,
+    SplitAtPlayhead, StepBackward, StepForward, ToggleFullscreen, ToggleLoop, ToggleMarker,
+    ToggleMute, TogglePlay, ToggleTheme, TrimToMarkers,
     clip_filter::ClipFilter,
     editor::Editor,
     frame_image,
@@ -718,6 +719,21 @@ impl PlicApp {
             .update(cx, |player, cx| player.seek_by(seek_step_ms(), window, cx));
     }
 
+    fn shuttle_backward(
+        &mut self,
+        _: &ShuttleBackward,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.player
+            .update(cx, |player, cx| player.shuttle_backward(window, cx));
+    }
+
+    fn shuttle_forward(&mut self, _: &ShuttleForward, window: &mut Window, cx: &mut Context<Self>) {
+        self.player
+            .update(cx, |player, cx| player.shuttle_forward(window, cx));
+    }
+
     fn step_backward(&mut self, _: &StepBackward, window: &mut Window, cx: &mut Context<Self>) {
         self.player
             .update(cx, |player, cx| player.step(-1, window, cx));
@@ -1121,6 +1137,8 @@ impl Render for PlicApp {
             .on_action(cx.listener(Self::toggle_play))
             .on_action(cx.listener(Self::seek_backward))
             .on_action(cx.listener(Self::seek_forward))
+            .on_action(cx.listener(Self::shuttle_backward))
+            .on_action(cx.listener(Self::shuttle_forward))
             .on_action(cx.listener(Self::step_backward))
             .on_action(cx.listener(Self::step_forward))
             .on_action(cx.listener(Self::jump_to_start))

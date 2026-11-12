@@ -78,6 +78,11 @@ Finished exports stay listed under the queue: copy one to the clipboard
 as a file (paste it straight into Discord or Explorer) or show it in its
 folder. `Ctrl+Shift+C` copies the latest one.
 
+The speed button next to the loop toggle plays at 0.5x, 1x, 1.5x or 2x;
+the sound keeps its pitch. `J`, `K` and `L` work as a shuttle: `L` plays
+forward and each further press goes faster, `J` plays backward the same
+way, and `K` stops. The arrow keys still jump by the seek step.
+
 Hovering the timeline shows a small preview of the frame under the
 pointer. Filmstrips of the last few clips are kept, so flipping back to
 one is instant.
