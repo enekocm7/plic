@@ -119,6 +119,25 @@ impl Quality {
 pub struct VideoEncoding {
     pub codec: Codec,
     pub quality: Quality,
+    /// Aim for a file of this many bytes instead of a constant quality.
+    pub target_size: Option<u64>,
+}
+
+/// How an encoder spends bits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Rate {
+    Quality(Quality),
+    /// An average bitrate, in bits per second.
+    Bitrate(u64),
+}
+
+/// The video encoder arguments for one export.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodePlan {
+    pub args: Vec<String>,
+    /// Whether to run a statistics pass first; software encoders hit a
+    /// bitrate much more closely that way.
+    pub two_pass: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,9 +161,52 @@ impl Encoder {
         Self { name, family }
     }
 
-    fn args(&self, codec: Codec, quality: Quality) -> Vec<String> {
-        let level = quality.level(codec).to_string();
+    fn args(&self, codec: Codec, rate: Rate) -> Vec<String> {
         let mut args: Vec<String> = vec!["-c:v".into(), self.name.into()];
+        let extra: Vec<String> = match rate {
+            Rate::Quality(quality) => self.quality_args(codec, quality),
+            Rate::Bitrate(bitrate) => self.bitrate_args(bitrate),
+        };
+        args.extend(extra);
+        // Apple players only take HEVC in MP4 with this tag.
+        if codec == Codec::Hevc {
+            args.extend(["-tag:v".into(), "hvc1".into()]);
+        }
+        args
+    }
+
+    /// Whether this encoder takes a first statistics pass.
+    fn two_pass(&self) -> bool {
+        matches!(self.family, Family::X26x | Family::SvtAv1 | Family::Aom)
+    }
+
+    fn bitrate_args(&self, bitrate: u64) -> Vec<String> {
+        let rate = bitrate.to_string();
+        let buffer = (bitrate * 2).to_string();
+        let capped = |args: &[&str]| -> Vec<String> {
+            let mut args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+            for (flag, value) in [("-b:v", &rate), ("-maxrate", &rate), ("-bufsize", &buffer)] {
+                args.push(flag.into());
+                args.push(value.clone());
+            }
+            args
+        };
+        match self.family {
+            Family::Amf => capped(&["-quality", "balanced", "-rc", "vbr_peak"]),
+            Family::Nvenc => capped(&["-preset", "p5", "-rc", "vbr", "-multipass", "fullres"]),
+            Family::Qsv => capped(&["-preset", "fast"]),
+            Family::X26x => ["-preset", "medium", "-b:v", &rate]
+                .map(String::from)
+                .to_vec(),
+            Family::SvtAv1 => ["-preset", "8", "-b:v", &rate].map(String::from).to_vec(),
+            Family::Aom => ["-cpu-used", "6", "-row-mt", "1", "-b:v", &rate]
+                .map(String::from)
+                .to_vec(),
+        }
+    }
+
+    fn quality_args(&self, codec: Codec, quality: Quality) -> Vec<String> {
+        let level = quality.level(codec).to_string();
         let extra: Vec<&str> = match self.family {
             Family::Amf => vec![
                 "-quality", "balanced", "-rc", "cqp", "-qp_i", &level, "-qp_p", &level,
@@ -164,12 +226,7 @@ impl Encoder {
                 "0",
             ],
         };
-        args.extend(extra.into_iter().map(String::from));
-        // Apple players only take HEVC in MP4 with this tag.
-        if codec == Codec::Hevc {
-            args.extend(["-tag:v".into(), "hvc1".into()]);
-        }
-        args
+        extra.into_iter().map(String::from).collect()
     }
 
     /// Whether this encoder can encode a short test clip on this machine.
@@ -177,7 +234,7 @@ impl Encoder {
         Command::new("ffmpeg")
             .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i"])
             .arg("color=c=black:s=640x360:r=30:d=0.5,format=yuv420p")
-            .args(self.args(codec, Quality::Balanced))
+            .args(self.args(codec, Rate::Quality(Quality::Balanced)))
             .args(["-f", "null", "-"])
             .no_window()
             .stdin(Stdio::null())
@@ -190,6 +247,22 @@ impl Encoder {
 
 static CHOSEN: [OnceLock<&'static Encoder>; 3] =
     [OnceLock::new(), OnceLock::new(), OnceLock::new()];
+static CHOSEN_SOFTWARE: [OnceLock<&'static Encoder>; 3] =
+    [OnceLock::new(), OnceLock::new(), OnceLock::new()];
+
+/// The first software encoder for `codec` that works here. Hardware
+/// encoders have a bitrate floor and overshoot small targets, so aiming for
+/// a size always uses one of these, in two passes.
+fn software_encoder(codec: Codec) -> &'static Encoder {
+    CHOSEN_SOFTWARE[codec.index()].get_or_init(|| {
+        let encoders = codec.encoders();
+        encoders
+            .iter()
+            .filter(|encoder| encoder.two_pass())
+            .find(|encoder| encoder.works(codec))
+            .unwrap_or(&encoders[encoders.len() - 1])
+    })
+}
 
 /// The first encoder for `codec` that works here, probing on first use.
 fn encoder(codec: Codec) -> &'static Encoder {
@@ -202,9 +275,22 @@ fn encoder(codec: Codec) -> &'static Encoder {
     })
 }
 
-/// The ffmpeg arguments that encode the video as `encoding` asks.
-pub fn video_args(encoding: VideoEncoding) -> Vec<String> {
-    encoder(encoding.codec).args(encoding.codec, encoding.quality)
+/// How to encode the video as `encoding` asks: at its quality preset, or
+/// at `bitrate` when one was worked out from a target size.
+pub fn plan(encoding: VideoEncoding, bitrate: Option<u64>) -> EncodePlan {
+    match bitrate {
+        Some(bitrate) => {
+            let encoder = software_encoder(encoding.codec);
+            EncodePlan {
+                args: encoder.args(encoding.codec, Rate::Bitrate(bitrate)),
+                two_pass: encoder.two_pass(),
+            }
+        }
+        None => EncodePlan {
+            args: encoder(encoding.codec).args(encoding.codec, Rate::Quality(encoding.quality)),
+            two_pass: false,
+        },
+    }
 }
 
 /// Probes `codec`'s encoders on a background thread so the next export in
@@ -221,7 +307,7 @@ mod tests {
     fn quality_levels_map_onto_each_encoder() {
         let nvenc = &Codec::Hevc.encoders()[1];
         assert_eq!(
-            nvenc.args(Codec::Hevc, Quality::High),
+            nvenc.args(Codec::Hevc, Rate::Quality(Quality::High)),
             [
                 "-c:v",
                 "hevc_nvenc",
@@ -239,11 +325,30 @@ mod tests {
         );
         let svt = &Codec::Av1.encoders()[3];
         assert_eq!(
-            svt.args(Codec::Av1, Quality::Small),
+            svt.args(Codec::Av1, Rate::Quality(Quality::Small)),
             ["-c:v", "libsvtav1", "-preset", "8", "-crf", "38"]
         );
         // The default keeps the quality plic always exported at.
         assert_eq!(Quality::default().level(Codec::H264), 20);
+    }
+
+    #[test]
+    fn bitrate_mode_caps_hardware_and_two_passes_software() {
+        let amf = &Codec::H264.encoders()[0];
+        assert_eq!(
+            amf.args(Codec::H264, Rate::Bitrate(2_000_000)),
+            [
+                "-c:v", "h264_amf", "-quality", "balanced", "-rc", "vbr_peak", "-b:v", "2000000",
+                "-maxrate", "2000000", "-bufsize", "4000000"
+            ]
+        );
+        assert!(!amf.two_pass());
+        let x264 = &Codec::H264.encoders()[3];
+        assert_eq!(
+            x264.args(Codec::H264, Rate::Bitrate(800_000)),
+            ["-c:v", "libx264", "-preset", "medium", "-b:v", "800000"]
+        );
+        assert!(x264.two_pass());
     }
 
     #[test]

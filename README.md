@@ -49,6 +49,10 @@ game and microphone tracks are mixed into one; untick everything to drop
 the sound. A gain slider and **Normalize loudness** (to -14 LUFS) change the
 exported level without touching the viewer's volume.
 
+Pick a **Size** (10, 25, 50 or 100 MB) to fit an upload limit: plic works
+out the bitrate from the export's length and encodes in two passes with
+the codec's software encoder, which lands just under the size.
+
 Turn on **Lossless** in the export panel to copy the video instead of
 re-encoding it: the export is near-instant and keeps the original quality,
 but the cut starts on the keyframe at or before the chosen start. The panel

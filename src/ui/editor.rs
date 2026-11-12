@@ -44,6 +44,9 @@ pub const PANEL_WIDTH: f32 = 320.;
 /// Destination folder names, filtered as the user types.
 type FolderList = SearchableVec<SharedString>;
 
+/// Sizes offered as export targets, in megabytes: common upload limits.
+const TARGET_SIZES_MB: [u64; 4] = [10, 25, 50, 100];
+
 /// The gain slider's range, in decibels either way.
 const MAX_GAIN_DB: f32 = 20.0;
 
@@ -1124,8 +1127,21 @@ impl PlicApp {
         cx.notify();
     }
 
-    /// Codec and quality buttons for re-encoded exports.
-    fn render_encoding(&self, enabled: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    fn set_target_size(&mut self, megabytes: Option<u64>, cx: &mut Context<Self>) {
+        self.editor.video.target_size = megabytes.map(|megabytes| megabytes * 1024 * 1024);
+        self.editor.export_error = None;
+        cx.notify();
+    }
+
+    /// Codec, quality and target size for re-encoded exports. `length` is
+    /// how long the export will be, to check a target size against.
+    fn render_encoding(
+        &self,
+        enabled: bool,
+        length: Option<Duration>,
+        with_audio: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let theme = cx.theme().clone();
         let video = self.editor.video;
         let row = |label: &'static str| {
@@ -1148,20 +1164,51 @@ impl PlicApp {
                 .disabled(!enabled)
                 .on_click(cx.listener(move |this, _, _, cx| this.set_codec(codec, cx)))
         });
+        let sized = video.target_size.is_some();
         let qualities = Quality::ALL.map(|quality| {
             Button::new(SharedString::from(format!("quality-{}", quality.label())))
                 .ghost()
                 .xsmall()
                 .flex_1()
                 .label(quality.label())
-                .selected(video.quality == quality)
-                .disabled(!enabled)
+                .selected(video.quality == quality && !sized)
+                .disabled(!enabled || sized)
                 .on_click(cx.listener(move |this, _, _, cx| this.set_quality(quality, cx)))
         });
+        let target_megabytes = video.target_size.map(|bytes| bytes / (1024 * 1024));
+        let sizes = std::iter::once(None)
+            .chain(TARGET_SIZES_MB.iter().copied().map(Some))
+            .map(|megabytes| {
+                Button::new(SharedString::from(format!(
+                    "target-{}",
+                    megabytes.unwrap_or(0)
+                )))
+                .ghost()
+                .xsmall()
+                .flex_1()
+                .label(megabytes.map_or("Any".to_string(), |megabytes| format!("{megabytes} MB")))
+                .selected(target_megabytes == megabytes)
+                .disabled(!enabled)
+                .on_click(cx.listener(move |this, _, _, cx| this.set_target_size(megabytes, cx)))
+            });
+        // A target too small for the length cannot be met; say so now.
+        let size_problem = video
+            .target_size
+            .zip(length)
+            .and_then(|(target, length)| ffmpeg::target_bitrates(target, length, with_audio).err());
         v_flex()
             .gap_1()
             .child(row("Codec").child(h_flex().flex_1().gap_0p5().children(codecs)))
             .child(row("Quality").child(h_flex().flex_1().gap_0p5().children(qualities)))
+            .child(row("Size").child(h_flex().flex_1().gap_0p5().children(sizes)))
+            .when_some(size_problem, |column, problem| {
+                column.child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.danger)
+                        .child(format!("{problem:#}")),
+                )
+            })
     }
 
     fn set_mode(&mut self, lossless: bool, cx: &mut Context<Self>) {
@@ -1248,12 +1295,19 @@ impl PlicApp {
             let effective = TrimRange::new(effective_start, trim.end).length(duration)?;
             Some(others - active + effective)
         });
-        let estimate = entry
-            .zip(duration)
-            .zip(length)
-            .map(|((entry, duration), length)| {
-                format_size(ffmpeg::estimated_size(entry.file.size, duration, length))
-            });
+        // With a target size the file lands just under it; otherwise the
+        // source's bitrate is the best cheap guess.
+        let target = self.editor.video.target_size.filter(|_| !lossless);
+        let estimate = match target {
+            Some(target) => Some(format_size(target)),
+            None => entry
+                .zip(duration)
+                .zip(length)
+                .map(|((entry, duration), length)| {
+                    format_size(ffmpeg::estimated_size(entry.file.size, duration, length))
+                }),
+        };
+        let with_audio = entry.is_some_and(|entry| !entry.export_tracks().is_empty());
         // One compact line: kept length, out of how much, and the likely size.
         let summary = h_flex()
             .h(px(36.))
@@ -1292,8 +1346,13 @@ impl PlicApp {
                         .text_xs()
                         .text_color(theme.muted_foreground)
                         .child(format!("≈ {estimate}"))
-                        .tooltip(|window, cx| {
-                            Tooltip::new("Estimated from the original's bitrate").build(window, cx)
+                        .tooltip(move |window, cx| {
+                            Tooltip::new(if target.is_some() {
+                                "Encoded to fit this size"
+                            } else {
+                                "Estimated from the original's bitrate"
+                            })
+                            .build(window, cx)
                         }),
                 )
             });
@@ -1445,15 +1504,12 @@ impl PlicApp {
                             |panel, entry| panel.child(self.render_audio_controls(entry, cx)),
                         )
                         .child(summary)
-                        .child(
-                            v_flex()
-                                .gap_1p5()
-                                .child(mode_row)
-                                .children(snapped)
-                                .when(!lossless, |column| {
-                                    column.child(self.render_encoding(enabled, cx))
-                                }),
-                        )
+                        .child(v_flex().gap_1p5().child(mode_row).children(snapped).when(
+                            !lossless,
+                            |column| {
+                                column.child(self.render_encoding(enabled, length, with_audio, cx))
+                            },
+                        ))
                         .child(
                             v_flex()
                                 .gap_1p5()
