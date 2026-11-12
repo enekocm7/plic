@@ -86,9 +86,14 @@ pub fn run(folder: Option<PathBuf>) {
             keymap::apply(cx);
             cx.on_action(|_: &Quit, cx| {
                 crate::state::save();
+                crate::drafts::save();
                 cx.quit()
             });
-            cx.on_window_closed(|_, _| crate::state::save()).detach();
+            cx.on_window_closed(|_, _| {
+                crate::state::save();
+                crate::drafts::save();
+            })
+            .detach();
 
             let options = WindowOptions {
                 window_bounds: Some(
