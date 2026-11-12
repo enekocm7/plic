@@ -64,6 +64,10 @@ re-encoding it: the export is near-instant and keeps the original quality,
 but the cut starts on the keyframe at or before the chosen start. The panel
 shows where it will really start.
 
+Press `Ctrl+Shift+S` (or the camera button above the viewer) to save the
+frame under the playhead as a full-resolution PNG, or `Ctrl+Alt+S` for a
+JPEG. It lands in the clip's destination folder as `name-01m12s345.png`.
+
 Exports run in the background, one at a time, while plic moves on to the
 next clip. Press `?` to see every shortcut.
 

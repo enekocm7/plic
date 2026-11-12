@@ -18,7 +18,10 @@ pub use encoder::{Codec, Quality, VideoEncoding, warm_up as warm_up_encoder};
 pub use export::{
     CancelToken, ExportError, ExportMode, ExportRequest, estimated_size, export, target_bitrates,
 };
-pub use frames::{FrameSize, RawFrame, VideoStream, extract_frame, extract_keyframe};
+pub use frames::{
+    FrameSize, ImageFormat, RawFrame, VideoStream, extract_frame, extract_keyframe,
+    frame_file_stem, save_frame,
+};
 pub use graph::{AudioAdjust, TARGET_LOUDNESS};
 pub use probe::{MediaInfo, keyframe_at_or_before, probe};
 pub use transform::{CropAspect, CropRect, OutputLimits, Transform};
