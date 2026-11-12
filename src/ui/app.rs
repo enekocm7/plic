@@ -1458,8 +1458,8 @@ fn inspect(path: &Path) -> (Details, Option<RawFrame>) {
     let at = info.duration.map_or(Duration::ZERO, |duration| {
         (duration / 10).min(Duration::from_secs(1))
     });
-    let thumbnail = info
-        .video_size
-        .and_then(|size| ffmpeg::extract_keyframe(path, at, size.fit_within(THUMBNAIL_SIZE)).ok());
+    let thumbnail = info.video_size.and_then(|size| {
+        ffmpeg::extract_keyframe(path, at, size.fit_within(THUMBNAIL_SIZE), info.decoder()).ok()
+    });
     (Details::Ready(info), thumbnail)
 }

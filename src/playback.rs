@@ -9,7 +9,7 @@ use anyhow::Result;
 
 use crate::{
     audio::{AudioOutput, AudioSession},
-    ffmpeg::{FrameSize, MediaInfo, RawFrame, VideoStream},
+    ffmpeg::{Decoder, FrameSize, MediaInfo, RawFrame, VideoStream},
 };
 
 /// Playback never decodes faster than this; higher rates only cost CPU.
@@ -55,6 +55,13 @@ impl Effort {
 
     fn hardware(self, info: &MediaInfo) -> bool {
         self > Self::Normal || info.prefers_hardware_decode()
+    }
+
+    fn decoder(self, info: &MediaInfo) -> Decoder {
+        Decoder {
+            hardware: self.hardware(info),
+            ..info.decoder()
+        }
     }
 }
 
@@ -140,8 +147,7 @@ impl Playback {
         if effort == Effort::HalfRate {
             frame_rate = (frame_rate / 2.0).max(1.0);
         }
-        let video =
-            VideoStream::spawn(path, from, size, frame_rate, timing, effort.hardware(info))?;
+        let video = VideoStream::spawn(path, from, size, frame_rate, timing, effort.decoder(info))?;
         // A clip whose audio cannot be decoded still plays, silently.
         let audio = audio.and_then(|output| output.start(path, from, speed, timing).ok());
         Ok(Self {

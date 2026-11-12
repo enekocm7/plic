@@ -81,6 +81,14 @@ impl MediaInfo {
         huge || self.video_codec.as_deref() == Some("av1")
     }
 
+    /// How previews of this clip should be decoded.
+    pub fn decoder(&self) -> super::Decoder {
+        super::Decoder {
+            hardware: self.prefers_hardware_decode(),
+            av1: self.video_codec.as_deref() == Some("av1"),
+        }
+    }
+
     pub fn timing(&self) -> Timing {
         Timing {
             origin: self.start_time,

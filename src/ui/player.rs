@@ -177,7 +177,10 @@ impl Keyframes {
         true
     }
 
-    fn nearest(&self, at: Duration) -> Option<&Arc<RenderImage>> {
+    /// The picture nearest to `at`. While pictures are still arriving, only
+    /// one within `reach`: the nearest so far may be from another part of
+    /// the clip, and would be replaced again by every newer one.
+    fn nearest(&self, at: Duration, reach: Duration) -> Option<&Arc<RenderImage>> {
         let after = self.frames.partition_point(|(time, _)| *time < at);
         let candidates = [after.checked_sub(1), Some(after)];
         candidates
@@ -185,18 +188,20 @@ impl Keyframes {
             .flatten()
             .filter_map(|index| self.frames.get(index))
             .min_by_key(|(time, _)| time.abs_diff(at))
+            .filter(|(time, _)| self.complete || time.abs_diff(at) <= reach)
             .map(|(_, image)| image)
     }
 
-    /// One picture per filmstrip tile, the keyframe nearest its middle.
+    /// One picture per filmstrip tile, the one nearest its middle.
     fn filmstrip(&self, duration: Option<Duration>) -> Vec<Option<Arc<RenderImage>>> {
         let Some(duration) = duration.filter(|_| !self.frames.is_empty()) else {
             return Vec::new();
         };
+        let tile = duration / FILMSTRIP_TILES as u32;
         (0..FILMSTRIP_TILES)
             .map(|index| {
                 let middle = duration.mul_f64((index as f64 + 0.5) / FILMSTRIP_TILES as f64);
-                self.nearest(middle).cloned()
+                self.nearest(middle, tile).cloned()
             })
             .collect()
     }
@@ -418,7 +423,7 @@ impl Player {
             return;
         }
         let size = self.decode_size_of(info);
-        let hardware = info.prefers_hardware_decode();
+        let decoder = info.decoder();
         let Some(key) = FrameKey::new(&path, start, size) else {
             return;
         };
@@ -431,7 +436,7 @@ impl Player {
             if epoch.load(Ordering::Relaxed) != queued_at {
                 anyhow::bail!("another clip was opened");
             }
-            ffmpeg::extract_frame(&path, start, size, hardware)
+            ffmpeg::extract_frame(&path, start, size, decoder)
         });
         cx.spawn(async move |this, cx| {
             let frame = job.await;
@@ -1146,7 +1151,8 @@ impl Player {
 
     /// The keyframe nearest to `at`, decoded when the clip was opened.
     fn hover_image(&self, at: Duration) -> Option<Arc<RenderImage>> {
-        self.keyframes.nearest(at).cloned()
+        let tile = self.duration()? / FILMSTRIP_TILES as u32;
+        self.keyframes.nearest(at, tile).cloned()
     }
 
     /// A small frame with its time above the hovered point of the timeline.
@@ -1260,7 +1266,7 @@ impl Player {
         // keyframes, once the keyframes are all up.
         let fill = (duration <= FILL_MAX_DURATION)
             .then(|| (duration / FILL_PICTURES).max(MIN_FILL_INTERVAL));
-        let hardware = source.info.prefers_hardware_decode();
+        let decoder = source.info.decoder();
         let path = source.path.clone();
         let generation = self.generation;
         let live = Arc::clone(&self.live_generation);
@@ -1273,11 +1279,11 @@ impl Player {
             if live.load(Ordering::Relaxed) != generation {
                 return;
             }
-            let _ = ffmpeg::keyframes(&path, size, |frame| send(frame, spacing));
+            let _ = ffmpeg::keyframes(&path, size, decoder, |frame| send(frame, spacing));
             if let Some(interval) = fill
                 && live.load(Ordering::Relaxed) == generation
             {
-                let _ = ffmpeg::sampled_frames(&path, size, interval, hardware, |frame| {
+                let _ = ffmpeg::sampled_frames(&path, size, interval, decoder, |frame| {
                     send(frame, interval / 2)
                 });
             }
@@ -1355,7 +1361,7 @@ impl Player {
 
         let path = source.path.clone();
         let size = self.decode_size(source);
-        let hardware = source.info.prefers_hardware_decode();
+        let decoder = source.info.decoder();
         let generation = self.generation;
         let live = Arc::clone(&self.live_generation);
         // Decodes queued for a clip that has been closed again are skipped
@@ -1365,8 +1371,8 @@ impl Player {
                 anyhow::bail!("another clip was opened");
             }
             match quality {
-                StillQuality::Exact => ffmpeg::extract_frame(&path, at, size, hardware),
-                StillQuality::Fast => ffmpeg::extract_keyframe(&path, at, size),
+                StillQuality::Exact => ffmpeg::extract_frame(&path, at, size, decoder),
+                StillQuality::Fast => ffmpeg::extract_keyframe(&path, at, size, decoder),
             }
         });
         cx.spawn(async move |this, cx| {

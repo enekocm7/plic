@@ -11,7 +11,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 
-use super::{CommandExt as _, Timing, seconds_arg};
+use super::{CommandExt as _, Decoder, Timing, seconds_arg};
 
 /// Pixel dimensions of a frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -58,38 +58,54 @@ pub struct RawFrame {
 
 /// Decodes the exact frame shown at `at`, scaled to `size`.
 ///
-/// `hardware` decodes on the GPU when `at` is past the start, where every
-/// frame since the previous keyframe has to be decoded first; see
-/// [`MediaInfo::prefers_hardware_decode`](super::MediaInfo).
+/// The GPU is used only past the start, where every frame since the
+/// previous keyframe has to be decoded first; see [`Decoder`].
 pub fn extract_frame(
     path: &Path,
     at: Duration,
     size: FrameSize,
-    hardware: bool,
+    decoder: Decoder,
 ) -> Result<RawFrame> {
-    let mut command = base_command();
-    if hardware && !at.is_zero() {
-        command.args(super::hwaccel_args());
-    }
-    if at.is_zero() {
-        // Only the first picture is needed, so spreading it over every core
-        // costs more in start-up than it saves; this is the frame shown
-        // whenever a clip is opened.
-        command.args(["-threads", "1"]);
+    let decoder = if at.is_zero() {
+        decoder.without_hardware()
     } else {
-        command.arg("-ss").arg(seconds_arg(at));
-    }
-    command.arg("-i").arg(path);
-    run_single_frame(command, size, at, "bicubic")
+        decoder
+    };
+    decoder.with_fallback(|decoder| {
+        let mut command = base_command();
+        command.args(decoder.args());
+        if at.is_zero() {
+            // Only the first picture is needed, so spreading it over every
+            // core costs more in start-up than it saves; this is the frame
+            // shown whenever a clip is opened.
+            command.args(["-threads", "1"]);
+        } else {
+            command.arg("-ss").arg(seconds_arg(at));
+        }
+        command.arg("-i").arg(path);
+        run_single_frame(command, size, at, "bicubic")
+    })
 }
 
 /// Decodes a frame near `at`, normally the keyframe before it. Faster than
 /// [`extract_frame`] because frames between keyframes are skipped (a quarter
 /// faster on 1440p video, a third on 4K); good enough for thumbnails and for
 /// previewing a drag along the timeline.
-pub fn extract_keyframe(path: &Path, at: Duration, size: FrameSize) -> Result<RawFrame> {
+pub fn extract_keyframe(
+    path: &Path,
+    at: Duration,
+    size: FrameSize,
+    decoder: Decoder,
+) -> Result<RawFrame> {
+    decoder
+        .without_hardware()
+        .with_fallback(|decoder| keyframe_near(path, at, size, decoder))
+}
+
+fn keyframe_near(path: &Path, at: Duration, size: FrameSize, decoder: Decoder) -> Result<RawFrame> {
     let fast_seek = |skip_to_keyframes: bool| {
         let mut command = base_command();
+        command.args(decoder.args());
         if skip_to_keyframes {
             command.args(["-skip_frame", "nokey"]);
         }
@@ -203,11 +219,18 @@ fn run_single_frame(
 pub fn keyframes(
     path: &Path,
     size: FrameSize,
-    on_frame: impl FnMut(RawFrame) -> bool,
+    decoder: Decoder,
+    mut on_frame: impl FnMut(RawFrame) -> bool,
 ) -> Result<()> {
-    let mut command = crate::ffmpeg::command(crate::ffmpeg::Tool::Ffmpeg);
-    command.args(["-skip_frame", "nokey"]).arg("-i").arg(path);
-    preview_frames(command, scale_filter(size, "bilinear"), size, on_frame)
+    decoder.without_hardware().with_fallback(|decoder| {
+        let mut command = crate::ffmpeg::command(crate::ffmpeg::Tool::Ffmpeg);
+        command
+            .args(decoder.args())
+            .args(["-skip_frame", "nokey"])
+            .arg("-i")
+            .arg(path);
+        preview_frames(command, scale_filter(size, "bilinear"), size, &mut on_frame)
+    })
 }
 
 /// Decodes the whole of `path` and hands over one frame every `interval`,
@@ -218,22 +241,22 @@ pub fn sampled_frames(
     path: &Path,
     size: FrameSize,
     interval: Duration,
-    hardware: bool,
-    on_frame: impl FnMut(RawFrame) -> bool,
+    decoder: Decoder,
+    mut on_frame: impl FnMut(RawFrame) -> bool,
 ) -> Result<()> {
-    let mut command = crate::ffmpeg::command(crate::ffmpeg::Tool::Ffmpeg);
-    if hardware {
-        command.args(super::hwaccel_args());
-    }
-    // Deblocking makes no visible difference at thumbnail size, and
-    // skipping it decodes a fifth faster.
-    command
-        .args(["-skip_loop_filter", "all"])
-        .arg("-i")
-        .arg(path);
     let rate = 1.0 / interval.as_secs_f64().max(0.001);
     let filter = format!("fps={rate:.6},{}", scale_filter(size, "bilinear"));
-    preview_frames(command, filter, size, on_frame)
+    decoder.with_fallback(|decoder| {
+        let mut command = crate::ffmpeg::command(crate::ffmpeg::Tool::Ffmpeg);
+        // Deblocking makes no visible difference at thumbnail size, and
+        // skipping it decodes a fifth faster.
+        command
+            .args(decoder.args())
+            .args(["-skip_loop_filter", "all"])
+            .arg("-i")
+            .arg(path);
+        preview_frames(command, filter.clone(), size, &mut on_frame)
+    })
 }
 
 /// Runs `command`, an ffmpeg with its input set, through `filter` and
@@ -242,7 +265,7 @@ fn preview_frames(
     mut command: Command,
     filter: String,
     size: FrameSize,
-    mut on_frame: impl FnMut(RawFrame) -> bool,
+    on_frame: &mut impl FnMut(RawFrame) -> bool,
 ) -> Result<()> {
     // rawvideo carries no timestamps; `showinfo` prints each frame's on
     // stderr, in the same order the pictures arrive on stdout.
@@ -277,6 +300,7 @@ fn preview_frames(
         .context("could not start the keyframe reader")?;
 
     let mut result = Ok(());
+    let mut delivered = 0;
     loop {
         let mut bgra = vec![0; size.byte_len()];
         if stdout.read_exact(&mut bgra).is_err() {
@@ -286,9 +310,18 @@ fn preview_frames(
             result = Err(anyhow::anyhow!("ffmpeg gave a frame without its time"));
             break;
         };
+        delivered += 1;
         if !on_frame(RawFrame { size, pts, bgra }) {
             break;
         }
+    }
+    if delivered == 0 {
+        // Nothing decoded at all, typically a decoder that cannot start.
+        let status = child.wait().context("ffmpeg did not finish")?;
+        if !status.success() {
+            bail!("ffmpeg could not decode {}", "the clip");
+        }
+        return result;
     }
     let _ = child.kill();
     let _ = child.wait();
@@ -336,21 +369,18 @@ pub struct VideoStream {
 }
 
 impl VideoStream {
-    /// Starts decoding. `hardware` lets ffmpeg decode on the GPU; see
-    /// [`MediaInfo::prefers_hardware_decode`](super::MediaInfo).
+    /// Starts decoding with `decoder`.
     pub fn spawn(
         path: &Path,
         start: Duration,
         size: FrameSize,
         frame_rate: f64,
         timing: Timing,
-        hardware: bool,
+        decoder: Decoder,
     ) -> Result<Self> {
         let first = timing.first_frame(start);
         let mut command = base_command();
-        if hardware {
-            command.args(super::hwaccel_args());
-        }
+        command.args(decoder.args());
         command
             .arg("-ss")
             .arg(seconds_arg(start))
@@ -500,11 +530,16 @@ mod tests {
         assert!(made.success());
 
         let mut times = Vec::new();
-        keyframes(&source, FrameSize::new(64, 36), |frame| {
-            assert_eq!(frame.bgra.len(), 64 * 36 * 4);
-            times.push(frame.pts.as_secs_f64());
-            true
-        })
+        keyframes(
+            &source,
+            FrameSize::new(64, 36),
+            Decoder::default(),
+            |frame| {
+                assert_eq!(frame.bgra.len(), 64 * 36 * 4);
+                times.push(frame.pts.as_secs_f64());
+                true
+            },
+        )
         .unwrap();
         std::fs::remove_dir_all(&dir).ok();
         assert_eq!(times.len(), 5, "{times:?}");

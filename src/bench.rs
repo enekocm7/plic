@@ -468,7 +468,18 @@ fn video_flashes(
     hardware: bool,
 ) -> Vec<f64> {
     let size = FrameSize::new(160, 90);
-    let mut stream = VideoStream::spawn(path, secs(from), size, rate, timing, hardware).unwrap();
+    let mut stream = VideoStream::spawn(
+        path,
+        secs(from),
+        size,
+        rate,
+        timing,
+        ffmpeg::Decoder {
+            hardware,
+            av1: false,
+        },
+    )
+    .unwrap();
     let mut flashes = Vec::new();
     let mut lit = false;
     while let Some(frame) = wait_for_frame(&mut stream) {
@@ -590,9 +601,15 @@ fn bench_first_frame() {
     let mut report = Report::new("first_frame");
     for (name, path) in video_fixtures() {
         // The first run only warms the file cache.
-        ffmpeg::extract_frame(&path, Duration::ZERO, VIEW, false).unwrap();
+        ffmpeg::extract_frame(&path, Duration::ZERO, VIEW, ffmpeg::Decoder::default()).unwrap();
         let runs = (0..9)
-            .map(|_| time(|| ffmpeg::extract_frame(&path, Duration::ZERO, VIEW, false).unwrap()).0)
+            .map(|_| {
+                time(|| {
+                    ffmpeg::extract_frame(&path, Duration::ZERO, VIEW, ffmpeg::Decoder::default())
+                        .unwrap()
+                })
+                .0
+            })
             .collect();
         report.add(format!("first_frame {name}"), "ms", runs);
     }
@@ -613,10 +630,16 @@ fn bench_seek_still() {
     let mut report = Report::new("seek_still");
     for (name, path) in video_fixtures() {
         let duration = info_of(&path).duration.unwrap().as_secs_f64();
-        ffmpeg::extract_frame(&path, Duration::ZERO, VIEW, false).unwrap();
+        ffmpeg::extract_frame(&path, Duration::ZERO, VIEW, ffmpeg::Decoder::default()).unwrap();
         let runs = random_positions(duration)
             .into_iter()
-            .map(|at| time(|| ffmpeg::extract_frame(&path, secs(at), VIEW, false).unwrap()).0)
+            .map(|at| {
+                time(|| {
+                    ffmpeg::extract_frame(&path, secs(at), VIEW, ffmpeg::Decoder::default())
+                        .unwrap()
+                })
+                .0
+            })
             .collect();
         report.add(format!("seek_still {name}"), "ms", runs);
     }
@@ -625,7 +648,7 @@ fn bench_seek_still() {
 
 /// What the player decodes for each step of a timeline drag.
 fn scrub_step(path: &Path, at: Duration, size: FrameSize) -> RawFrame {
-    ffmpeg::extract_keyframe(path, at, size).unwrap()
+    ffmpeg::extract_keyframe(path, at, size, ffmpeg::Decoder::default()).unwrap()
 }
 
 #[test]
@@ -651,16 +674,35 @@ fn bench_playback_start() {
     for (name, path) in video_fixtures() {
         let info = info_of(&path);
         let (rate, timing) = (crate::playback::decode_rate(&info), info.timing());
-        drop(VideoStream::spawn(&path, Duration::ZERO, VIEW, rate, timing, false).unwrap());
+        drop(
+            VideoStream::spawn(
+                &path,
+                Duration::ZERO,
+                VIEW,
+                rate,
+                timing,
+                ffmpeg::Decoder::default(),
+            )
+            .unwrap(),
+        );
         // The start of the clip, and a point well inside a group of pictures.
         for at in [0.0, 12.3] {
             for hwaccel in [true, false] {
                 let runs = (0..7)
                     .map(|_| {
                         time(|| {
-                            let mut stream =
-                                VideoStream::spawn(&path, secs(at), VIEW, rate, timing, hwaccel)
-                                    .unwrap();
+                            let mut stream = VideoStream::spawn(
+                                &path,
+                                secs(at),
+                                VIEW,
+                                rate,
+                                timing,
+                                ffmpeg::Decoder {
+                                    hardware: hwaccel,
+                                    av1: false,
+                                },
+                            )
+                            .unwrap();
                             wait_for_frame(&mut stream).unwrap()
                         })
                         .0
@@ -707,8 +749,18 @@ fn bench_decode_throughput() {
         for hwaccel in [true, false] {
             let runs = (0..3)
                 .map(|_| {
-                    let mut stream =
-                        VideoStream::spawn(&path, secs(10.0), VIEW, rate, timing, hwaccel).unwrap();
+                    let mut stream = VideoStream::spawn(
+                        &path,
+                        secs(10.0),
+                        VIEW,
+                        rate,
+                        timing,
+                        ffmpeg::Decoder {
+                            hardware: hwaccel,
+                            av1: false,
+                        },
+                    )
+                    .unwrap();
                     let first = wait_for_frame(&mut stream).unwrap();
                     let started = Instant::now();
                     let mut frames = 0u32;
@@ -1198,7 +1250,12 @@ fn background_extras(
             {
                 return;
             }
-            let _ = ffmpeg::extract_keyframe(&path, at, FrameSize::new(192, 108));
+            let _ = ffmpeg::extract_keyframe(
+                &path,
+                at,
+                FrameSize::new(192, 108),
+                ffmpeg::Decoder::default(),
+            );
         }));
     }
     let path = path.to_path_buf();
@@ -1218,7 +1275,8 @@ fn browse_eager(clips: &[PathBuf], interval: Duration, duration: Duration) -> Ve
         let (decoded, sender) = (clip.clone(), sender.clone());
         opened.push(Instant::now());
         thread::spawn(move || {
-            ffmpeg::extract_frame(&decoded, Duration::ZERO, VIEW, false).unwrap();
+            ffmpeg::extract_frame(&decoded, Duration::ZERO, VIEW, ffmpeg::Decoder::default())
+                .unwrap();
             sender.send((index, Instant::now())).unwrap();
         });
         background_extras(clip, duration, &filmstrip, None);
@@ -1261,7 +1319,9 @@ fn browse_latest(clips: &[PathBuf], interval: Duration, duration: Duration) -> V
                 if live.load(Ordering::Relaxed) != generation {
                     return;
                 }
-                let frame = ffmpeg::extract_frame(&clip, Duration::ZERO, VIEW, false).unwrap();
+                let frame =
+                    ffmpeg::extract_frame(&clip, Duration::ZERO, VIEW, ffmpeg::Decoder::default())
+                        .unwrap();
                 cache.lock().unwrap().insert(key, frame);
                 let _ = sender.send(Instant::now());
             }));
@@ -1289,7 +1349,13 @@ fn browse_latest(clips: &[PathBuf], interval: Duration, duration: Duration) -> V
                     if cache.lock().unwrap().contains(&key) {
                         return;
                     }
-                    let frame = ffmpeg::extract_frame(&next, Duration::ZERO, VIEW, false).unwrap();
+                    let frame = ffmpeg::extract_frame(
+                        &next,
+                        Duration::ZERO,
+                        VIEW,
+                        ffmpeg::Decoder::default(),
+                    )
+                    .unwrap();
                     cache.lock().unwrap().insert(key, frame);
                 }));
             }
@@ -1363,7 +1429,18 @@ fn bench_inspect() {
         .unwrap()
         .fit_within(FrameSize::new(160, 90));
     let thumbnail = (0..9)
-        .map(|_| time(|| ffmpeg::extract_keyframe(&path, Duration::from_secs(1), size).unwrap()).0)
+        .map(|_| {
+            time(|| {
+                ffmpeg::extract_keyframe(
+                    &path,
+                    Duration::from_secs(1),
+                    size,
+                    ffmpeg::Decoder::default(),
+                )
+                .unwrap()
+            })
+            .0
+        })
         .collect();
     report.add("inspect thumbnail", "ms", thumbnail);
     report.finish();
@@ -1402,7 +1479,7 @@ fn bench_timeline_previews() {
             .video_size
             .unwrap()
             .fit_within(FrameSize::new(240, 135));
-        ffmpeg::extract_keyframe(&path, Duration::ZERO, size).unwrap();
+        ffmpeg::extract_keyframe(&path, Duration::ZERO, size, ffmpeg::Decoder::default()).unwrap();
 
         let mut strip_old = Vec::new();
         let mut strip_new = Vec::new();
@@ -1415,7 +1492,9 @@ fn bench_timeline_previews() {
                     .map(|index| {
                         let at = duration.mul_f64((index as f64 + 0.5) / 12.0);
                         let path = path.clone();
-                        pool.run(move || ffmpeg::extract_keyframe(&path, at, size))
+                        pool.run(move || {
+                            ffmpeg::extract_keyframe(&path, at, size, ffmpeg::Decoder::default())
+                        })
                     })
                     .collect();
                 for job in jobs {
@@ -1427,7 +1506,7 @@ fn bench_timeline_previews() {
             let started = Instant::now();
             let mut first = None;
             count = 0;
-            ffmpeg::keyframes(&path, size, |_| {
+            ffmpeg::keyframes(&path, size, info.decoder(), |_| {
                 first.get_or_insert_with(|| ms(started.elapsed()));
                 count += 1;
                 true
@@ -1440,11 +1519,7 @@ fn bench_timeline_previews() {
             .into_iter()
             .take(6)
             .map(|at| {
-                time(|| {
-                    ffmpeg::extract_frame(&path, secs(at), size, info.prefers_hardware_decode())
-                        .unwrap()
-                })
-                .0
+                time(|| ffmpeg::extract_frame(&path, secs(at), size, info.decoder()).unwrap()).0
             })
             .collect();
         report.add(
