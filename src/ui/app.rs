@@ -20,10 +20,12 @@ use gpui_kit::*;
 use super::{
     AddSegment, CONTEXT, CopyLastExport, DeleteClip, ExitFullscreen, ExportClip, JumpToEnd,
     JumpToIn, JumpToOut, JumpToStart, MarkIn, MarkOut, NextMarker, OpenFolder, PreviousMarker,
-    Redo, Reload, ResetTrim, SaveFrame, SaveFrameJpeg, SeekBackward, SeekForward, SelectNextClip,
-    SelectPreviousClip, ShowSettings, ShowShortcuts, ShuttleBackward, ShuttleForward,
-    SplitAtPlayhead, StepBackward, StepForward, ToggleFullscreen, ToggleLoop, ToggleMarker,
-    ToggleMute, TogglePlay, ToggleTheme, TrimToMarkers, Undo, ZoomIn, ZoomOut, ZoomToFit,
+    Redo, Reload, ResetTrim, SaveFrame, SaveFrameJpeg, SeekBackward, SeekForward, SelectAllClips,
+    SelectNextClip, SelectPreviousClip, ShowSettings, ShowShortcuts, ShuttleBackward,
+    ShuttleForward, SplitAtPlayhead, StepBackward, StepForward, ToggleFullscreen, ToggleLoop,
+    ToggleMarker, ToggleMute, TogglePlay, ToggleTheme, TrimToMarkers, Undo, ZoomIn, ZoomOut,
+    ZoomToFit,
+    batch::Marks,
     clip_filter::ClipFilter,
     editor::Editor,
     frame_image,
@@ -178,6 +180,8 @@ pub struct PlicApp {
     /// The selected clip still to be edited. At most one of this and
     /// `settled_selected` is set.
     pub(super) selected: Option<usize>,
+    /// Clips selected together with Ctrl and Shift, for batch actions.
+    pub(super) marks: Marks,
     pub(super) list_scroll: UniformListScrollHandle,
     /// Originals already exported, shown in the collapsible Settled list.
     pub(super) settled: Vec<ClipEntry>,
@@ -240,6 +244,7 @@ impl PlicApp {
             folders: Vec::new(),
             last_folder: None,
             selected: None,
+            marks: Marks::default(),
             list_scroll: UniformListScrollHandle::new(),
             settled: Vec::new(),
             settled_selected: None,
@@ -312,6 +317,7 @@ impl PlicApp {
         self.sync_folder_choices(window, cx);
         self.selected = None;
         self.settled_selected = None;
+        self.marks.clear();
         self.select(0, window, cx);
         if self.clips.is_empty() {
             self.show_selected_in_player(cx);
@@ -681,11 +687,23 @@ impl PlicApp {
     }
 
     fn export_clip(&mut self, _: &ExportClip, window: &mut Window, cx: &mut Context<Self>) {
-        self.export_current(window, cx);
+        if self.has_batch() && !self.is_viewing_settled() {
+            self.export_selection(window, cx);
+        } else {
+            self.export_current(window, cx);
+        }
     }
 
     fn delete_clip(&mut self, _: &DeleteClip, window: &mut Window, cx: &mut Context<Self>) {
-        self.confirm_delete(window, cx);
+        if self.has_batch() && !self.is_viewing_settled() {
+            self.confirm_delete_selection(window, cx);
+        } else {
+            self.confirm_delete(window, cx);
+        }
+    }
+
+    fn select_all_clips(&mut self, _: &SelectAllClips, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_all(cx);
     }
 
     fn mark_in(&mut self, _: &MarkIn, _: &mut Window, cx: &mut Context<Self>) {
@@ -835,7 +853,7 @@ impl PlicApp {
     fn exit_fullscreen(&mut self, _: &ExitFullscreen, window: &mut Window, cx: &mut Context<Self>) {
         if self.fullscreen {
             self.set_fullscreen(false, window, cx);
-        } else {
+        } else if !self.clear_marks(cx) {
             cx.propagate();
         }
     }
@@ -884,6 +902,7 @@ impl PlicApp {
     /// whichever list the selection is in.
     fn select_neighbour(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
         use super::library_panel::List;
+        self.marks.clear();
         let (list, selected) = match (self.settled_selected, self.selected) {
             (Some(selected), _) => (List::Settled, Some(selected)),
             (None, selected) => (List::Clips, selected),
@@ -1291,6 +1310,7 @@ impl Render for PlicApp {
             .on_action(cx.listener(Self::jump_to_out))
             .on_action(cx.listener(Self::export_clip))
             .on_action(cx.listener(Self::delete_clip))
+            .on_action(cx.listener(Self::select_all_clips))
             .on_action(cx.listener(Self::show_shortcuts))
             .on_action(cx.listener(Self::show_settings))
             .on_action(cx.listener(Self::undo_action))

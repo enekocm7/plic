@@ -1,6 +1,7 @@
 //! The GPUI front end.
 
 mod app;
+mod batch;
 mod clip_actions;
 mod clip_filter;
 mod editor;
@@ -66,6 +67,7 @@ actions!(
         CopyLastExport,
         SaveFrameJpeg,
         DeleteClip,
+        SelectAllClips,
         OpenFolder,
         Reload,
         ToggleTheme,

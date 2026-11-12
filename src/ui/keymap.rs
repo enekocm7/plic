@@ -189,7 +189,7 @@ pub const COMMANDS: &[Command] = &[
         ExitFullscreen,
         Keys,
         ["escape"],
-        "Leave fullscreen"
+        "Leave fullscreen, or select just one clip again"
     ),
     command!(
         "mark_in",
@@ -326,6 +326,14 @@ pub const COMMANDS: &[Command] = &[
         Keys,
         ["ctrl-y", "ctrl-shift-z"],
         "Redo"
+    ),
+    command!(
+        "select_all_clips",
+        "Clips",
+        SelectAllClips,
+        Keys,
+        ["ctrl-a"],
+        "Select every clip in the list"
     ),
     command!(
         "open_folder",

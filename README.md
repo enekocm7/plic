@@ -42,6 +42,13 @@ its folder with that clip selected. Dropped files are never moved.
    `I` and `O` at the playhead, or by typing the times in the export panel.
 3. Name it, choose the destination folder, and press `Ctrl+Enter`.
 
+Ctrl-click clips to pick several, Shift-click to pick a run of them, or
+press `Ctrl+A` for every clip the list shows. A bar over the list then
+exports them all (`Ctrl+Enter`) with the export panel's format and the
+selected clip's destination, naming each with the name template or its own
+name; moves them into another folder; or deletes them (`Delete`). `Escape`
+goes back to a single clip.
+
 To keep several parts of one recording, press `N` (or **Add segment at the
 playhead**) to start another segment, and trim it like the first. Click a
 segment on the timeline or in the export panel to edit it. Press `S` to
