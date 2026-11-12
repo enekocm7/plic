@@ -53,6 +53,7 @@ pub struct TimelineState {
     /// Where the pointer rests, marked with a faint line.
     pub hover: Option<Duration>,
     pub drag: Option<Drag>,
+    pub markers: Vec<Duration>,
     pub aspect_ratio: f32,
 }
 
@@ -214,6 +215,7 @@ pub fn render(state: TimelineState, cx: &mut Context<Player>) -> impl IntoElemen
         handle_grip: black().opacity(0.55),
         playhead: white(),
         hover: white().opacity(0.5),
+        marker: theme.cyan,
         knob_border: black().opacity(0.35),
     };
     let this = cx.entity().downgrade();
@@ -245,6 +247,9 @@ pub fn render(state: TimelineState, cx: &mut Context<Player>) -> impl IntoElemen
             if let Some(hover) = state.hover {
                 paint_hover(window, strip, scale.x(hover), &colors);
             }
+            for marker in &state.markers {
+                paint_marker(window, strip, scale.x(*marker), &colors);
+            }
             paint_playhead(window, strip, scale.x(state.position), &colors);
 
             let hovered = hitbox
@@ -271,6 +276,7 @@ struct Colors {
     handle_grip: Hsla,
     playhead: Hsla,
     hover: Hsla,
+    marker: Hsla,
     knob_border: Hsla,
 }
 
@@ -425,6 +431,19 @@ fn paint_hover(window: &mut Window, strip: Bounds<Pixels>, x: Pixels, colors: &C
         size: size(px(1.), strip.size.height),
     };
     window.paint_quad(fill(line, colors.hover));
+}
+
+fn paint_marker(window: &mut Window, strip: Bounds<Pixels>, x: Pixels, colors: &Colors) {
+    let line = Bounds {
+        origin: point(x - px(0.5), strip.origin.y),
+        size: size(px(1.), strip.size.height),
+    };
+    window.paint_quad(fill(line, colors.marker));
+    let flag = Bounds {
+        origin: point(x - px(4.), strip.origin.y + strip.size.height),
+        size: size(px(8.), px(6.)),
+    };
+    window.paint_quad(fill(flag, colors.marker).corner_radii(px(2.)));
 }
 
 fn paint_playhead(window: &mut Window, strip: Bounds<Pixels>, x: Pixels, colors: &Colors) {
