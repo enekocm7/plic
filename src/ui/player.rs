@@ -689,6 +689,19 @@ impl Player {
         self.segments.active()
     }
 
+    /// Whether a timeline drag is under way.
+    pub fn is_dragging(&self) -> bool {
+        self.drag.is_some()
+    }
+
+    /// Replaces every segment, e.g. when a trim is undone.
+    pub fn set_segments(&mut self, segments: Segments, cx: &mut Context<Self>) {
+        if self.segments != segments {
+            self.segments = segments;
+            cx.notify();
+        }
+    }
+
     /// Replaces the active segment's range, e.g. after it was typed into
     /// the editor.
     pub fn set_trim(&mut self, trim: TrimRange, cx: &mut Context<Self>) {

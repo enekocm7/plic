@@ -312,6 +312,22 @@ pub const COMMANDS: &[Command] = &[
         "Delete"
     ),
     command!(
+        "undo",
+        "Clips",
+        Undo,
+        Keys,
+        ["ctrl-z"],
+        "Undo a trim, delete or archive move"
+    ),
+    command!(
+        "redo",
+        "Clips",
+        Redo,
+        Keys,
+        ["ctrl-y", "ctrl-shift-z"],
+        "Redo"
+    ),
+    command!(
         "open_folder",
         "Clips",
         OpenFolder,

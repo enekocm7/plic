@@ -5,6 +5,7 @@ mod clip_actions;
 mod clip_filter;
 mod editor;
 mod frame_image;
+mod history;
 mod jobs;
 mod keymap;
 mod library_panel;
@@ -39,6 +40,8 @@ actions!(
         ZoomIn,
         ZoomOut,
         ZoomToFit,
+        Undo,
+        Redo,
         StepBackward,
         StepForward,
         JumpToStart,
