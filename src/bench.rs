@@ -495,10 +495,10 @@ struct Onsets {
 }
 
 impl Onsets {
-    fn new(threshold: f32, quiet: f64) -> Self {
+    fn new(threshold: f32, quiet: f64, rate: u32) -> Self {
         Self {
             threshold,
-            quiet: (quiet * f64::from(SAMPLE_RATE)) as u64,
+            quiet: (quiet * f64::from(rate)) as u64,
             index: 0,
             last_loud: None,
             found: Vec::new(),
@@ -520,14 +520,15 @@ impl Onsets {
 }
 
 /// Times of every beep in the first `window` seconds of what the player's
-/// audio decoder produces when asked to start at `from`.
-fn audio_beeps(path: &Path, from: f64, window: f64, timing: Timing) -> Vec<f64> {
-    let mut child = feeder_command(path, secs(from), 1.0, timing, SAMPLE_RATE, 2)
+/// audio decoder produces when asked to start at `from`, for an output
+/// device running at `rate`.
+fn audio_beeps(path: &Path, from: f64, window: f64, timing: Timing, rate: u32) -> Vec<f64> {
+    let mut child = feeder_command(path, secs(from), 1.0, timing, rate, 2)
         .spawn()
         .unwrap();
     let mut stdout = child.stdout.take().unwrap();
-    let mut onsets = Onsets::new(0.12, 0.5);
-    let wanted = (window * f64::from(SAMPLE_RATE)) as u64;
+    let mut onsets = Onsets::new(0.12, 0.5, rate);
+    let wanted = (window * f64::from(rate)) as u64;
     let mut buffer = vec![0u8; 64 * 1024];
     let mut carry = 0;
     'read: while onsets.index < wanted {
@@ -551,7 +552,7 @@ fn audio_beeps(path: &Path, from: f64, window: f64, timing: Timing) -> Vec<f64> 
     onsets
         .found
         .iter()
-        .map(|&i| from + i as f64 / f64::from(SAMPLE_RATE))
+        .map(|&i| from + i as f64 / f64::from(rate))
         .collect()
 }
 
@@ -743,7 +744,7 @@ fn sync_case(report: &mut Report, label: &str, fixture: &Fixture, from: f64, win
         timing,
         info.prefers_hardware_decode(),
     );
-    let beeps = audio_beeps(&fixture.path, from, window, timing);
+    let beeps = audio_beeps(&fixture.path, from, window, timing, SAMPLE_RATE);
 
     let video_error = worst_error(fixture.marks, &flashes);
     let audio_error = worst_error(fixture.marks, &beeps);
@@ -794,6 +795,23 @@ fn bench_playback_sync() {
                 &fixture,
                 from,
                 spec.period * 2.2,
+            );
+        }
+    }
+    // Output devices often run at 44.1 kHz while clips are 48 kHz: the sound
+    // must still start exactly where it was asked to.
+    for spec in [SYNC_MARKS, SYNC_AUDIO_LATE] {
+        let fixture = sync_fixture(&spec);
+        let timing = info_of(&fixture.path).timing();
+        for from in [0.0, 7.3, 61.1] {
+            let beeps = audio_beeps(&fixture.path, from, spec.period * 2.2, timing, 44_100);
+            report.add(
+                format!(
+                    "{} from {from}s audio @44.1k max|err|",
+                    spec.name.trim_end_matches(".mp4")
+                ),
+                "ms",
+                vec![worst_error(fixture.marks, &beeps) * 1000.0],
             );
         }
     }
@@ -1041,7 +1059,7 @@ fn align(path: &Path) -> Alignment {
         .map(|b| f32::from_le_bytes(*b))
         .collect();
     let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
-    let mut onsets = Onsets::new((peak * 0.25).max(0.01), 0.1);
+    let mut onsets = Onsets::new((peak * 0.25).max(0.01), 0.1, SAMPLE_RATE);
     samples.iter().for_each(|&s| onsets.push(s));
     let beeps: Vec<f64> = onsets
         .found
@@ -1348,5 +1366,99 @@ fn bench_inspect() {
         .map(|_| time(|| ffmpeg::extract_keyframe(&path, Duration::from_secs(1), size).unwrap()).0)
         .collect();
     report.add("inspect thumbnail", "ms", thumbnail);
+    report.finish();
+}
+
+/// Clips to benchmark besides the fixtures: `PLIC_BENCH_CLIPS`, paths
+/// separated by `;`. Real recordings decode far slower than test patterns.
+fn real_clips() -> Vec<(String, PathBuf)> {
+    std::env::var("PLIC_BENCH_CLIPS")
+        .unwrap_or_default()
+        .split(';')
+        .filter(|path| !path.trim().is_empty())
+        .map(|path| {
+            let path = PathBuf::from(path.trim());
+            let name = path.file_stem().unwrap().to_string_lossy().into_owned();
+            (name, path)
+        })
+        .collect()
+}
+
+/// The timeline's filmstrip and hover preview: the old way, twelve
+/// keyframe seeks on two workers plus an exact decode per hover position,
+/// against one pass over every keyframe.
+#[test]
+#[ignore]
+fn bench_timeline_previews() {
+    let mut report = Report::new("timeline_previews");
+    let clips = video_fixtures()
+        .into_iter()
+        .map(|(name, path)| (name.to_string(), path))
+        .chain(real_clips());
+    for (name, path) in clips {
+        let info = info_of(&path);
+        let duration = info.duration.unwrap();
+        let size = info
+            .video_size
+            .unwrap()
+            .fit_within(FrameSize::new(240, 135));
+        ffmpeg::extract_keyframe(&path, Duration::ZERO, size).unwrap();
+
+        let mut strip_old = Vec::new();
+        let mut strip_new = Vec::new();
+        let mut first_new = Vec::new();
+        let mut count = 0;
+        for _ in 0..3 {
+            let pool = WorkerPool::new("filmstrip", 2);
+            let (elapsed, ()) = time(|| {
+                let jobs: Vec<_> = (0..12)
+                    .map(|index| {
+                        let at = duration.mul_f64((index as f64 + 0.5) / 12.0);
+                        let path = path.clone();
+                        pool.run(move || ffmpeg::extract_keyframe(&path, at, size))
+                    })
+                    .collect();
+                for job in jobs {
+                    futures::executor::block_on(job).unwrap().unwrap();
+                }
+            });
+            strip_old.push(elapsed);
+
+            let started = Instant::now();
+            let mut first = None;
+            count = 0;
+            ffmpeg::keyframes(&path, size, |_| {
+                first.get_or_insert_with(|| ms(started.elapsed()));
+                count += 1;
+                true
+            })
+            .unwrap();
+            strip_new.push(ms(started.elapsed()));
+            first_new.push(first.unwrap());
+        }
+        let hover_old = random_positions(duration.as_secs_f64())
+            .into_iter()
+            .take(6)
+            .map(|at| {
+                time(|| {
+                    ffmpeg::extract_frame(&path, secs(at), size, info.prefers_hardware_decode())
+                        .unwrap()
+                })
+                .0
+            })
+            .collect();
+        report.add(
+            format!("{name} old filmstrip, all 12 tiles"),
+            "ms",
+            strip_old,
+        );
+        report.add(format!("{name} old hover, each position"), "ms", hover_old);
+        report.add(format!("{name} new first keyframe"), "ms", first_new);
+        report.add(
+            format!("{name} new all {count} keyframes (filmstrip + every hover)"),
+            "ms",
+            strip_new,
+        );
+    }
     report.finish();
 }

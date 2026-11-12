@@ -48,7 +48,7 @@ const RESIZE_SETTLE: Duration = Duration::from_millis(250);
 
 /// How long a clip must stay open before its filmstrip and waveform are
 /// worked out, so flipping through clips only ever decodes their first frame.
-const EXTRAS_DELAY: Duration = Duration::from_millis(250);
+const EXTRAS_DELAY: Duration = Duration::from_millis(100);
 /// A paused jump at least this long shows the nearest keyframe before the
 /// exact frame, on clips that prefer hardware decoding.
 const KEYFRAME_FIRST_JUMP: Duration = Duration::from_secs(1);
@@ -57,12 +57,21 @@ const FIRST_FRAME_BUDGET: usize = 64 << 20;
 
 /// Thumbnails along the timeline.
 const FILMSTRIP_TILES: usize = 12;
-const FILMSTRIP_TILE_SIZE: FrameSize = FrameSize::new(192, 108);
-/// Filmstrips of recently viewed clips kept for flipping back to them.
-const FILMSTRIPS_KEPT: usize = 8;
-/// The hover preview decodes at most this many distinct frames per clip.
-const HOVER_STEPS: usize = 200;
-const HOVER_FRAME_SIZE: FrameSize = FrameSize::new(240, 135);
+/// Keyframe pictures, for the filmstrip and the hover preview, fit in this.
+const KEYFRAME_SIZE: FrameSize = FrameSize::new(240, 135);
+/// At most this many keyframe pictures are kept per clip, evenly spread:
+/// about 20 MB, and plenty for a preview the width of the timeline.
+const MAX_KEYFRAMES: usize = 150;
+/// Clips up to this long also get pictures between their keyframes, which
+/// can be several seconds apart; decoding a longer clip whole would take
+/// too long, and it has keyframes enough to tell its parts apart.
+const FILL_MAX_DURATION: Duration = Duration::from_secs(90);
+/// Pictures between keyframes are this many over the clip, but no closer
+/// than [`MIN_FILL_INTERVAL`].
+const FILL_PICTURES: u32 = 48;
+const MIN_FILL_INTERVAL: Duration = Duration::from_millis(500);
+/// Keyframes of recently viewed clips kept for flipping back to them.
+const KEYFRAMES_KEPT: usize = 4;
 const HOVER_PREVIEW_WIDTH: f32 = 160.;
 /// Zoomed all the way in, the timeline still shows this many frames.
 const MIN_VISIBLE_FRAMES: u32 = 20;
@@ -140,13 +149,61 @@ struct StillRequests {
     queued: Option<(Duration, StillQuality)>,
 }
 
-/// Frames for the timeline's hover preview, one per step of the clip. Only
-/// one decodes at a time; a newer position replaces the queued one.
+/// Small pictures of a clip's keyframes, decoded in one pass when the clip
+/// is opened. The filmstrip and the hover preview both show the keyframe
+/// nearest to their time, so they appear without decoding anything more.
 #[derive(Default)]
-struct HoverFrames {
-    in_flight: bool,
-    queued: Option<usize>,
-    frames: HashMap<usize, Arc<RenderImage>>,
+struct Keyframes {
+    /// Sorted by time.
+    frames: Vec<(Duration, Arc<RenderImage>)>,
+    /// Whether the whole clip has been decoded.
+    complete: bool,
+}
+
+impl Keyframes {
+    /// Adds a picture in time order, unless one already kept is closer than
+    /// `gap`: clips with a keyframe every frame would otherwise keep all.
+    fn insert(&mut self, at: Duration, image: Arc<RenderImage>, gap: Duration) -> bool {
+        let index = self.frames.partition_point(|(time, _)| *time < at);
+        let crowded = [index.checked_sub(1), Some(index)]
+            .into_iter()
+            .flatten()
+            .filter_map(|index| self.frames.get(index))
+            .any(|(time, _)| time.abs_diff(at) < gap);
+        if crowded {
+            return false;
+        }
+        self.frames.insert(index, (at, image));
+        true
+    }
+
+    fn nearest(&self, at: Duration) -> Option<&Arc<RenderImage>> {
+        let after = self.frames.partition_point(|(time, _)| *time < at);
+        let candidates = [after.checked_sub(1), Some(after)];
+        candidates
+            .into_iter()
+            .flatten()
+            .filter_map(|index| self.frames.get(index))
+            .min_by_key(|(time, _)| time.abs_diff(at))
+            .map(|(_, image)| image)
+    }
+
+    /// One picture per filmstrip tile, the keyframe nearest its middle.
+    fn filmstrip(&self, duration: Option<Duration>) -> Vec<Option<Arc<RenderImage>>> {
+        let Some(duration) = duration.filter(|_| !self.frames.is_empty()) else {
+            return Vec::new();
+        };
+        (0..FILMSTRIP_TILES)
+            .map(|index| {
+                let middle = duration.mul_f64((index as f64 + 0.5) / FILMSTRIP_TILES as f64);
+                self.nearest(middle).cloned()
+            })
+            .collect()
+    }
+
+    fn into_images(self) -> impl Iterator<Item = Arc<RenderImage>> {
+        self.frames.into_iter().map(|(_, image)| image)
+    }
 }
 
 /// Where the pointer rests over the timeline.
@@ -156,11 +213,6 @@ struct Hover {
     /// From the timeline's left edge.
     x: Pixels,
     timeline_width: Pixels,
-}
-
-fn hover_step(at: Duration, duration: Duration) -> usize {
-    let fraction = at.as_secs_f64() / duration.as_secs_f64().max(f64::EPSILON);
-    ((fraction * HOVER_STEPS as f64) as usize).min(HOVER_STEPS - 1)
 }
 
 pub struct Player {
@@ -209,12 +261,11 @@ pub struct Player {
     looping: bool,
     /// The part of the frame an export keeps, drawn over the video.
     crop: Option<CropRect>,
-    filmstrip: Vec<Option<Arc<RenderImage>>>,
-    filmstrip_workers: WorkerPool,
-    /// Complete filmstrips of recently viewed clips, newest first.
-    filmstrips: VecDeque<(PathBuf, Vec<Option<Arc<RenderImage>>>)>,
+    keyframes: Keyframes,
+    keyframe_workers: WorkerPool,
+    /// Complete keyframes of recently viewed clips, newest first.
+    recent_keyframes: VecDeque<(PathBuf, Keyframes)>,
     hover: Option<Hover>,
-    hover_frames: HoverFrames,
     /// Audio peaks of the loaded clip, once worked out.
     waveform: Option<Arc<[f32]>>,
     /// Peaks of every clip opened so far; they take a moment to compute.
@@ -270,11 +321,10 @@ impl Player {
             trimmable: true,
             looping: false,
             crop: None,
-            filmstrip: Vec::new(),
-            filmstrip_workers: WorkerPool::new("filmstrip", 2),
-            filmstrips: VecDeque::new(),
+            keyframes: Keyframes::default(),
+            keyframe_workers: WorkerPool::new("keyframes", 1),
+            recent_keyframes: VecDeque::new(),
             hover: None,
-            hover_frames: HoverFrames::default(),
             waveform: None,
             waveforms: HashMap::new(),
             audio: AudioDevice::Unopened,
@@ -342,7 +392,7 @@ impl Player {
             cx.background_executor().timer(EXTRAS_DELAY).await;
             this.update(cx, |this, cx| {
                 if this.generation == generation {
-                    this.request_filmstrip(cx);
+                    this.request_keyframes(cx);
                     this.request_waveform(cx);
                 }
             })
@@ -409,22 +459,20 @@ impl Player {
     }
 
     fn unload(&mut self) {
-        // Keep a finished filmstrip for when the clip is opened again.
-        let filmstrip = std::mem::take(&mut self.filmstrip);
+        // Keep finished keyframes for when the clip is opened again.
+        let keyframes = std::mem::take(&mut self.keyframes);
         match self.source.as_ref().map(|source| source.path.clone()) {
-            Some(path) if !filmstrip.is_empty() && filmstrip.iter().all(Option::is_some) => {
-                self.filmstrips.push_front((path, filmstrip));
-                while self.filmstrips.len() > FILMSTRIPS_KEPT {
-                    if let Some((_, old)) = self.filmstrips.pop_back() {
-                        self.stale_frames.extend(old.into_iter().flatten());
+            Some(path) if keyframes.complete && !keyframes.frames.is_empty() => {
+                self.recent_keyframes.push_front((path, keyframes));
+                while self.recent_keyframes.len() > KEYFRAMES_KEPT {
+                    if let Some((_, old)) = self.recent_keyframes.pop_back() {
+                        self.stale_frames.extend(old.into_images());
                     }
                 }
             }
-            _ => self.stale_frames.extend(filmstrip.into_iter().flatten()),
+            _ => self.stale_frames.extend(keyframes.into_images()),
         }
         self.hover = None;
-        let hover_frames = std::mem::take(&mut self.hover_frames);
-        self.stale_frames.extend(hover_frames.frames.into_values());
         self.generation += 1;
         self.live_generation
             .store(self.generation, Ordering::Relaxed);
@@ -1049,7 +1097,7 @@ impl Player {
             duration: self.duration(),
             position: self.position(),
             segments: self.trimmable.then(|| self.segments.clone()),
-            filmstrip: self.filmstrip.clone(),
+            filmstrip: self.keyframes.filmstrip(self.duration()),
             waveform: self.waveform.clone(),
             hover: self.visible_hover().map(|hover| hover.at),
             drag: self.drag,
@@ -1082,10 +1130,6 @@ impl Player {
             x,
             timeline_width,
         });
-        let step = hover_step(at, duration);
-        if !self.hover_frames.frames.contains_key(&step) {
-            self.request_hover_frame(step, cx);
-        }
         cx.notify();
     }
 
@@ -1100,77 +1144,9 @@ impl Player {
         self.hover.filter(|_| self.drag.is_none())
     }
 
-    /// Decodes the frame of a hover step, the same way paused seeks do.
-    fn request_hover_frame(&mut self, step: usize, cx: &mut Context<Self>) {
-        let Some(source) = &self.source else {
-            return;
-        };
-        let (Some(duration), Some(video_size)) = (source.info.duration, source.info.video_size)
-        else {
-            return;
-        };
-        if self.hover_frames.in_flight {
-            self.hover_frames.queued = Some(step);
-            return;
-        }
-        self.hover_frames.in_flight = true;
-        let at = duration.mul_f64((step as f64 + 0.5) / HOVER_STEPS as f64);
-        let size = video_size.fit_within(HOVER_FRAME_SIZE);
-        let path = source.path.clone();
-        let hardware = source.info.prefers_hardware_decode();
-        let generation = self.generation;
-        cx.spawn(async move |this, cx| {
-            let frame = cx
-                .background_spawn(async move { ffmpeg::extract_frame(&path, at, size, hardware) })
-                .await;
-            this.update(cx, |this, cx| {
-                if this.generation != generation {
-                    return;
-                }
-                this.hover_frames.in_flight = false;
-                if let Some(image) = frame.ok().and_then(frame_image::render_image) {
-                    this.hover_frames.frames.insert(step, image);
-                    cx.notify();
-                }
-                // Only the latest position matters, and only while hovering.
-                if let Some(next) = this.hover_frames.queued.take()
-                    && this.hover.is_some()
-                    && !this.hover_frames.frames.contains_key(&next)
-                {
-                    this.request_hover_frame(next, cx);
-                }
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// The decoded frame for `at`, or the closest one there is meanwhile:
-    /// another hover frame or a filmstrip tile.
+    /// The keyframe nearest to `at`, decoded when the clip was opened.
     fn hover_image(&self, at: Duration) -> Option<Arc<RenderImage>> {
-        let duration = self.duration()?;
-        let step = hover_step(at, duration);
-        if let Some(frame) = self.hover_frames.frames.get(&step) {
-            return Some(frame.clone());
-        }
-        let cached = self
-            .hover_frames
-            .frames
-            .iter()
-            .map(|(&other, frame)| (other.abs_diff(step), frame));
-        let tiles = self.filmstrip.len().max(1);
-        let tile = self
-            .filmstrip
-            .iter()
-            .enumerate()
-            .filter_map(|(index, tile)| {
-                let center = (2 * index + 1) * HOVER_STEPS / (2 * tiles);
-                Some((center.abs_diff(step), tile.as_ref()?))
-            });
-        cached
-            .chain(tile)
-            .min_by_key(|(distance, _)| *distance)
-            .map(|(_, frame)| frame.clone())
+        self.keyframes.nearest(at).cloned()
     }
 
     /// A small frame with its time above the hovered point of the timeline.
@@ -1258,8 +1234,10 @@ impl Player {
         .detach();
     }
 
-    /// Decodes evenly spaced keyframes to draw along the timeline.
-    fn request_filmstrip(&mut self, cx: &mut Context<Self>) {
+    /// Decodes every keyframe of the clip, small, for the filmstrip and the
+    /// hover preview. They stream in over a fraction of a second; each is
+    /// shown as soon as it arrives.
+    fn request_keyframes(&mut self, cx: &mut Context<Self>) {
         let Some(source) = &self.source else {
             return;
         };
@@ -1268,44 +1246,75 @@ impl Player {
             return;
         };
         if let Some(index) = self
-            .filmstrips
+            .recent_keyframes
             .iter()
             .position(|(path, _)| *path == source.path)
-            && let Some((_, filmstrip)) = self.filmstrips.remove(index)
+            && let Some((_, keyframes)) = self.recent_keyframes.remove(index)
         {
-            self.filmstrip = filmstrip;
+            self.keyframes = keyframes;
             return;
         }
-        let size = video_size.fit_within(FILMSTRIP_TILE_SIZE);
-        self.filmstrip = vec![None; FILMSTRIP_TILES];
+        let size = video_size.fit_within(KEYFRAME_SIZE);
+        let spacing = duration / MAX_KEYFRAMES as u32;
+        // Short clips are decoded again whole for pictures between their
+        // keyframes, once the keyframes are all up.
+        let fill = (duration <= FILL_MAX_DURATION)
+            .then(|| (duration / FILL_PICTURES).max(MIN_FILL_INTERVAL));
+        let hardware = source.info.prefers_hardware_decode();
+        let path = source.path.clone();
         let generation = self.generation;
-        for index in 0..FILMSTRIP_TILES {
-            let at = duration.mul_f64((index as f64 + 0.5) / FILMSTRIP_TILES as f64);
-            let path = source.path.clone();
-            let live = Arc::clone(&self.live_generation);
-            let job = self.filmstrip_workers.run(move || {
-                if live.load(Ordering::Relaxed) != generation {
-                    anyhow::bail!("another clip was opened");
-                }
-                ffmpeg::extract_keyframe(&path, at, size)
-            });
-            cx.spawn(async move |this, cx| {
-                let Ok(Ok(frame)) = job.await else {
-                    return;
+        let live = Arc::clone(&self.live_generation);
+        let (sender, mut receiver) = futures::channel::mpsc::unbounded();
+        let job = self.keyframe_workers.run(move || {
+            let send = |frame, gap| {
+                live.load(Ordering::Relaxed) == generation
+                    && sender.unbounded_send((frame, gap)).is_ok()
+            };
+            if live.load(Ordering::Relaxed) != generation {
+                return;
+            }
+            let _ = ffmpeg::keyframes(&path, size, |frame| send(frame, spacing));
+            if let Some(interval) = fill
+                && live.load(Ordering::Relaxed) == generation
+            {
+                let _ = ffmpeg::sampled_frames(&path, size, interval, hardware, |frame| {
+                    send(frame, interval / 2)
+                });
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            use futures::StreamExt as _;
+            while let Some((frame, gap)) = receiver.next().await {
+                let at = frame.pts;
+                let Some(image) = frame_image::render_image(frame) else {
+                    continue;
                 };
-                let image = frame_image::render_image(frame);
-                this.update(cx, |this, cx| {
-                    if this.generation == generation
-                        && let Some(slot) = this.filmstrip.get_mut(index)
-                    {
-                        *slot = image;
-                        cx.notify();
+                let still_open = this.update(cx, |this, cx| {
+                    if this.generation != generation {
+                        this.stale_frames.push(image);
+                        return false;
                     }
-                })
-                .ok();
+                    if this.keyframes.insert(at, image.clone(), gap) {
+                        cx.notify();
+                    } else {
+                        this.stale_frames.push(image);
+                    }
+                    true
+                });
+                if !matches!(still_open, Ok(true)) {
+                    return;
+                }
+            }
+            let _ = job.await;
+            this.update(cx, |this, cx| {
+                if this.generation == generation {
+                    this.keyframes.complete = true;
+                    cx.notify();
+                }
             })
-            .detach();
-        }
+            .ok();
+        })
+        .detach();
     }
 
     fn decode_size(&self, source: &Source) -> FrameSize {

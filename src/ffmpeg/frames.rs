@@ -1,7 +1,7 @@
 //! Decoding video frames to raw BGRA pixels, the format GPUI uploads as-is.
 
 use std::{
-    io::Read,
+    io::{BufRead as _, BufReader, Read},
     path::{Path, PathBuf},
     process::{Child, ChildStdout, Command, Stdio},
     sync::mpsc::{self, Receiver, SyncSender, TryRecvError},
@@ -193,6 +193,124 @@ fn run_single_frame(
     })
 }
 
+/// Decodes every keyframe of `path` in one pass, scaled to `size`, and hands
+/// each to `on_frame` as soon as it is ready, in order. Stops early, killing
+/// ffmpeg, when `on_frame` returns false.
+///
+/// Frames between keyframes are skipped without being decoded, so a whole
+/// clip takes about as long as two or three single-frame decodes: half a
+/// second for three minutes of 1440p AV1 with a keyframe every four seconds.
+pub fn keyframes(
+    path: &Path,
+    size: FrameSize,
+    on_frame: impl FnMut(RawFrame) -> bool,
+) -> Result<()> {
+    let mut command = crate::ffmpeg::command(crate::ffmpeg::Tool::Ffmpeg);
+    command.args(["-skip_frame", "nokey"]).arg("-i").arg(path);
+    preview_frames(command, scale_filter(size, "bilinear"), size, on_frame)
+}
+
+/// Decodes the whole of `path` and hands over one frame every `interval`,
+/// scaled to `size`, like [`keyframes`]. Slower, as every frame is decoded,
+/// but not limited to where the keyframes happen to be: a short clip may
+/// have only one every few seconds.
+pub fn sampled_frames(
+    path: &Path,
+    size: FrameSize,
+    interval: Duration,
+    hardware: bool,
+    on_frame: impl FnMut(RawFrame) -> bool,
+) -> Result<()> {
+    let mut command = crate::ffmpeg::command(crate::ffmpeg::Tool::Ffmpeg);
+    if hardware {
+        command.args(super::hwaccel_args());
+    }
+    // Deblocking makes no visible difference at thumbnail size, and
+    // skipping it decodes a fifth faster.
+    command
+        .args(["-skip_loop_filter", "all"])
+        .arg("-i")
+        .arg(path);
+    let rate = 1.0 / interval.as_secs_f64().max(0.001);
+    let filter = format!("fps={rate:.6},{}", scale_filter(size, "bilinear"));
+    preview_frames(command, filter, size, on_frame)
+}
+
+/// Runs `command`, an ffmpeg with its input set, through `filter` and
+/// hands over each frame with its time.
+fn preview_frames(
+    mut command: Command,
+    filter: String,
+    size: FrameSize,
+    mut on_frame: impl FnMut(RawFrame) -> bool,
+) -> Result<()> {
+    // rawvideo carries no timestamps; `showinfo` prints each frame's on
+    // stderr, in the same order the pictures arrive on stdout.
+    let mut child = command
+        .args(["-hide_banner", "-loglevel", "info", "-nostats", "-nostdin"])
+        .args(["-map", "0:v:0", "-an", "-sn", "-dn", "-vf"])
+        .arg(format!("{filter},showinfo"))
+        .args(["-fps_mode", "passthrough"])
+        .args(["-pix_fmt", "bgra", "-f", "rawvideo", "pipe:1"])
+        .no_window()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("could not start ffmpeg; wait for its download to finish or set its folder in the settings")?;
+    let mut stdout = child.stdout.take().context("ffmpeg has no stdout")?;
+    let stderr = child.stderr.take().context("ffmpeg has no stderr")?;
+
+    let (times, pts) = mpsc::channel();
+    thread::Builder::new()
+        .name("keyframe times".into())
+        .spawn(move || {
+            for line in BufReader::new(stderr).lines() {
+                let Ok(line) = line else { return };
+                if let Some(time) = showinfo_time(&line)
+                    && times.send(time).is_err()
+                {
+                    return;
+                }
+            }
+        })
+        .context("could not start the keyframe reader")?;
+
+    let mut result = Ok(());
+    loop {
+        let mut bgra = vec![0; size.byte_len()];
+        if stdout.read_exact(&mut bgra).is_err() {
+            break;
+        }
+        let Ok(pts) = pts.recv() else {
+            result = Err(anyhow::anyhow!("ffmpeg gave a frame without its time"));
+            break;
+        };
+        if !on_frame(RawFrame { size, pts, bgra }) {
+            break;
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    result
+}
+
+/// The time of a frame from one of `showinfo`'s lines, which look like
+/// `[Parsed_showinfo_1 @ 0x…] n:   3 pts: 375000 pts_time:12.5 duration: …`.
+fn showinfo_time(line: &str) -> Option<Duration> {
+    if !line.contains("showinfo") {
+        return None;
+    }
+    let seconds: f64 = line
+        .split_once("pts_time:")?
+        .1
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()?;
+    (seconds.is_finite() && seconds >= 0.0).then(|| Duration::from_secs_f64(seconds))
+}
+
 fn scale_filter(size: FrameSize, scaler: &str) -> String {
     format!("scale={}:{}:flags={scaler}", size.width, size.height)
 }
@@ -340,6 +458,59 @@ mod tests {
             frame_file_stem("a", Duration::from_secs(3_600)),
             "a-60m00s000"
         );
+    }
+
+    #[test]
+    fn reads_frame_times_from_showinfo() {
+        assert_eq!(
+            showinfo_time(
+                "[Parsed_showinfo_1 @ 000001] n:   3 pts: 375000 pts_time:12.5     duration:1500"
+            ),
+            Some(Duration::from_millis(12_500))
+        );
+        assert_eq!(
+            showinfo_time("[Parsed_showinfo_1 @ 000001] config in time_base: 1/90000"),
+            None
+        );
+        assert_eq!(showinfo_time("Stream #0:0: Video: av1 pts_time:3"), None);
+    }
+
+    /// Needs ffmpeg on PATH: `cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    fn decodes_every_keyframe_with_its_time() {
+        let dir = std::env::temp_dir().join(format!("plic-keys-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.mp4");
+        let made = crate::ffmpeg::command(crate::ffmpeg::Tool::Ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+            ])
+            .arg("testsrc2=s=320x180:r=30:d=10")
+            .args(["-c:v", "libx264", "-g", "60"])
+            .arg(&source)
+            .status()
+            .unwrap();
+        assert!(made.success());
+
+        let mut times = Vec::new();
+        keyframes(&source, FrameSize::new(64, 36), |frame| {
+            assert_eq!(frame.bgra.len(), 64 * 36 * 4);
+            times.push(frame.pts.as_secs_f64());
+            true
+        })
+        .unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(times.len(), 5, "{times:?}");
+        for (index, time) in times.iter().enumerate() {
+            assert!((time - index as f64 * 2.0).abs() < 0.01, "{times:?}");
+        }
     }
 
     #[test]

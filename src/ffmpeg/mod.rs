@@ -22,7 +22,7 @@ pub use export::{
 };
 pub use frames::{
     FrameSize, ImageFormat, RawFrame, VideoStream, extract_frame, extract_keyframe,
-    frame_file_stem, save_frame,
+    frame_file_stem, keyframes, sampled_frames, save_frame,
 };
 pub use graph::{AudioAdjust, TARGET_LOUDNESS};
 pub use probe::{MediaInfo, Timing, keyframe_at_or_before, probe};
