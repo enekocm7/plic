@@ -22,6 +22,8 @@ const GROUPS: &[Group] = &[
             (&[",", "."], "Previous or next frame"),
             (&["home", "end"], "Start or end of the clip"),
             (&["m"], "Mute"),
+            (&["f", "f11"], "Fullscreen viewer"),
+            (&["escape"], "Leave fullscreen"),
         ],
     ),
     (
