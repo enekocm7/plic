@@ -8,6 +8,7 @@ mod clipboard;
 mod ffmpeg;
 mod library;
 mod markers;
+mod naming;
 mod playback;
 mod scheduler;
 mod settings;

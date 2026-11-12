@@ -27,16 +27,22 @@ impl PlicApp {
                 .default_value(current.default_destination.clone())
                 .placeholder("The folder used last")
         });
+        let template = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(current.name_template.clone())
+                .placeholder("{name}")
+        });
         let focus = seek.read(cx).focus_handle(cx);
         window.defer(cx, move |window, cx| focus.focus(window, cx));
 
         let this = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, _, cx| {
-            let (this, seek, archive, destination) = (
+            let (this, seek, archive, destination, template) = (
                 this.clone(),
                 seek.clone(),
                 archive.clone(),
                 destination.clone(),
+                template.clone(),
             );
             let muted = cx.theme().muted_foreground;
             let field = |label: &'static str, hint: &'static str, input: &Entity<InputState>| {
@@ -66,6 +72,11 @@ impl PlicApp {
                             "Default destination",
                             "Subfolder that exports go to when you have not chosen one.",
                             &destination,
+                        ))
+                        .child(field(
+                            "Name template",
+                            "Pre-fills export names. Use {name}, {folder}, {date} and {n}, which counts up past names already used. Empty keeps the clip's name.",
+                            &template,
                         )),
                 )
                 .footer(
@@ -108,6 +119,7 @@ impl PlicApp {
                                             .read(cx)
                                             .value()
                                             .to_string(),
+                                        name_template: template.read(cx).value().to_string(),
                                     };
                                     if let Err(error) = crate::settings::update(settings) {
                                         window.push_notification(
