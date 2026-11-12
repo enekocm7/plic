@@ -33,6 +33,7 @@ use crate::{
     ffmpeg::{self, AudioAdjust, FrameSize, MediaInfo, RawFrame, Transform},
     library::{self, ClipFile, Library},
     trim::{Segments, TrimRange},
+    updates::Update,
     watcher::FolderWatcher,
     worker::WorkerPool,
 };
@@ -168,6 +169,13 @@ pub struct PlicApp {
     pub(super) failed_batches: HashSet<u64>,
     /// Recently exported files, newest first, for copying or showing.
     pub(super) finished: Vec<FinishedExport>,
+    /// A newer release found by the update check, shown as a banner.
+    pub(super) update: Option<Update>,
+    /// Whether an update check is in flight.
+    pub(super) checking_update: bool,
+    /// GitHub is asked on its own thread so a slow network never delays the
+    /// UI.
+    pub(super) updates_worker: WorkerPool,
 }
 
 impl PlicApp {
@@ -210,9 +218,17 @@ impl PlicApp {
             next_job_id: 0,
             failed_batches: HashSet::new(),
             finished: Vec::new(),
+            update: None,
+            checking_update: false,
+            updates_worker: WorkerPool::new("update", 1),
         };
         if let Some(folder) = folder {
             app.load_folder(folder, window, cx);
+        }
+        // A development build is not a release, so it does not ask GitHub on
+        // every `mise run dev`.
+        if !cfg!(debug_assertions) {
+            app.check_for_updates(false, window, cx);
         }
         app
     }
@@ -1055,6 +1071,17 @@ impl PlicApp {
                                 })),
                         )
                         .child(
+                            Button::new("check-updates")
+                                .ghost()
+                                .small()
+                                .icon(IconName::Download)
+                                .loading(self.checking_update)
+                                .tooltip("Check for updates")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.check_for_updates(true, window, cx)
+                                })),
+                        )
+                        .child(
                             Button::new("theme")
                                 .ghost()
                                 .small()
@@ -1125,6 +1152,9 @@ impl Render for PlicApp {
             }))
             .when(!self.fullscreen, |this| {
                 this.child(self.render_title_bar(cx))
+                    .when(self.update.is_some(), |this| {
+                        this.child(self.render_update_banner(cx))
+                    })
             })
             .child(
                 h_flex()
