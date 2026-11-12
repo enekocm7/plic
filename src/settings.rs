@@ -10,6 +10,8 @@ use std::{
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::ffmpeg::Quality;
+
 /// The folder originals are moved to after export, unless changed.
 pub const DEFAULT_ARCHIVE_FOLDER: &str = "edited";
 pub const DEFAULT_SEEK_STEP_SECS: u32 = 5;
@@ -32,6 +34,8 @@ pub struct Settings {
     /// Folder holding `ffmpeg` and `ffprobe` to use instead of plic's own
     /// copy. Empty uses plic's copy.
     pub ffmpeg_folder: String,
+    /// How hard re-encoded exports are compressed.
+    pub export_quality: Quality,
     /// Keys for commands, by command name, replacing the default keys.
     /// Commands left out keep their defaults; an empty list unbinds one.
     pub key_bindings: BTreeMap<String, Vec<String>>,
@@ -45,6 +49,7 @@ impl Default for Settings {
             default_destination: String::new(),
             name_template: String::new(),
             ffmpeg_folder: String::new(),
+            export_quality: Quality::default(),
             key_bindings: BTreeMap::new(),
         }
     }
@@ -122,6 +127,7 @@ mod tests {
         let settings: Settings = serde_json::from_str(r#"{"seek_step_secs": 10}"#).unwrap();
         assert_eq!(settings.seek_step_secs, 10);
         assert_eq!(settings.archive_folder, DEFAULT_ARCHIVE_FOLDER);
+        assert_eq!(settings.export_quality, Quality::Balanced);
     }
 
     #[test]
@@ -132,6 +138,7 @@ mod tests {
             default_destination: "  Best  ".into(),
             name_template: String::new(),
             ffmpeg_folder: String::new(),
+            export_quality: Quality::default(),
             key_bindings: BTreeMap::new(),
         }
         .sanitized();

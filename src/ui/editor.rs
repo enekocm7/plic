@@ -34,7 +34,7 @@ use super::app::{ClipEntry, ClipStatus, PlicApp, display_name};
 use super::library_panel::format_size;
 use super::{AddSegment, SplitAtPlayhead};
 use crate::{
-    ffmpeg::{self, Animation, Codec, CropAspect, ExportMode, Format, Quality, Transform},
+    ffmpeg::{self, Animation, Codec, CropAspect, ExportMode, Format, Transform},
     library, timestamp,
     trim::{self, TrimRange},
 };
@@ -1206,11 +1206,6 @@ impl PlicApp {
         }
     }
 
-    fn set_quality(&mut self, quality: Quality, cx: &mut Context<Self>) {
-        self.editor.video.quality = quality;
-        cx.notify();
-    }
-
     fn set_format(&mut self, format: Format, cx: &mut Context<Self>) {
         self.editor.format = format;
         self.editor.export_error = None;
@@ -1298,7 +1293,7 @@ impl PlicApp {
         cx.notify();
     }
 
-    /// Codec, quality and target size for re-encoded exports. `length` is
+    /// Codec, size limits and target size for re-encoded exports. `length` is
     /// how long the export will be, to check a target size against.
     fn render_encoding(
         &self,
@@ -1328,17 +1323,6 @@ impl PlicApp {
                 .selected(video.codec == codec)
                 .disabled(!enabled)
                 .on_click(cx.listener(move |this, _, _, cx| this.set_codec(codec, cx)))
-        });
-        let sized = video.target_size.is_some();
-        let qualities = Quality::ALL.map(|quality| {
-            Button::new(SharedString::from(format!("quality-{}", quality.label())))
-                .ghost()
-                .xsmall()
-                .flex_1()
-                .label(quality.label())
-                .selected(video.quality == quality && !sized)
-                .disabled(!enabled || sized)
-                .on_click(cx.listener(move |this, _, _, cx| this.set_quality(quality, cx)))
         });
         let target_megabytes = video.target_size.map(|bytes| bytes / (1024 * 1024));
         let sizes = std::iter::once(None)
@@ -1395,7 +1379,6 @@ impl PlicApp {
             .child(row("Codec").child(h_flex().flex_1().gap_0p5().children(codecs)))
             .child(row("Size").child(h_flex().flex_1().gap_0p5().children(resolutions)))
             .child(row("Rate").child(h_flex().flex_1().gap_0p5().children(rates)))
-            .child(row("Quality").child(h_flex().flex_1().gap_0p5().children(qualities)))
             .child(row("File").child(h_flex().flex_1().gap_0p5().children(sizes)))
             .when_some(size_problem, |column, problem| {
                 column.child(
