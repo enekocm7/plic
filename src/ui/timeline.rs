@@ -5,6 +5,9 @@
 //! at either end of the highlighted range to trim. A clip can have several
 //! segments: the active one has handles, and pressing inside another one
 //! makes it active.
+//!
+//! The mouse wheel zooms in around the pointer, and Shift with the wheel (or
+//! a sideways scroll) pans. Zoomed in far enough, a tick marks every frame.
 
 use std::{sync::Arc, time::Duration};
 
@@ -32,6 +35,12 @@ const WAVEFORM_HEIGHT: f32 = 20.;
 const WAVEFORM_STEP: f32 = 2.;
 /// Extra room around a handle tab that still grabs it.
 const GRAB_SLACK: f32 = 3.;
+/// Frames get a tick once they are at least this far apart.
+const FRAME_TICK_SPACING: f32 = 5.;
+/// Height of the bar under the strip showing which part is in view.
+const OVERVIEW_HEIGHT: f32 = 3.;
+/// How much one notch of the mouse wheel zooms.
+pub const WHEEL_ZOOM: f64 = 1.25;
 
 /// What a timeline drag moves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,33 +64,155 @@ pub struct TimelineState {
     pub drag: Option<Drag>,
     pub markers: Vec<Duration>,
     pub aspect_ratio: f32,
+    /// The part of the clip shown, when zoomed in.
+    pub view: View,
+    pub frame_interval: Duration,
 }
 
-/// Horizontal mapping between media time and pixels.
+/// The stretch of the clip the timeline shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct View {
+    pub start: Duration,
+    /// `None` shows the whole clip.
+    pub span: Option<Duration>,
+}
+
+impl View {
+    pub const WHOLE: Self = Self {
+        start: Duration::ZERO,
+        span: None,
+    };
+
+    /// The span shown of a clip `duration` long.
+    pub fn span(&self, duration: Duration) -> Duration {
+        self.span.map_or(duration, |span| span.min(duration))
+    }
+
+    /// Zooms by `factor` (above 1 zooms in) keeping `anchor` at the same
+    /// fraction of the width. The span stays between `min_span` and the
+    /// whole clip.
+    pub fn zoom(
+        self,
+        factor: f64,
+        anchor: Duration,
+        duration: Duration,
+        min_span: Duration,
+    ) -> Self {
+        let span = self.span(duration);
+        let fraction = (anchor.saturating_sub(self.start)).as_secs_f64()
+            / span.as_secs_f64().max(f64::EPSILON);
+        let fraction = fraction.clamp(0.0, 1.0);
+        let new_span = span
+            .div_f64(factor.max(f64::EPSILON))
+            .max(min_span.min(duration));
+        if new_span >= duration {
+            return Self::WHOLE;
+        }
+        let start = anchor.saturating_sub(new_span.mul_f64(fraction));
+        Self {
+            start,
+            span: Some(new_span),
+        }
+        .clamped(duration)
+    }
+
+    /// Moves the view by `by` seconds, negative going back.
+    pub fn pan(self, by: f64, duration: Duration) -> Self {
+        let Some(span) = self.span else {
+            return self;
+        };
+        let start = (self.start.as_secs_f64() + by).max(0.0);
+        Self {
+            start: Duration::from_secs_f64(start),
+            span: Some(span),
+        }
+        .clamped(duration)
+    }
+
+    /// Scrolls so `position` is in view, paging in the direction it went.
+    pub fn follow(self, position: Duration, duration: Duration) -> Self {
+        let Some(span) = self.span else {
+            return self;
+        };
+        let end = self.start + span;
+        let start = if position >= end {
+            position.saturating_sub(span.mul_f64(0.1))
+        } else if position < self.start {
+            position.saturating_sub(span.mul_f64(0.9))
+        } else {
+            return self;
+        };
+        Self {
+            start,
+            span: Some(span),
+        }
+        .clamped(duration)
+    }
+
+    /// Keeps the view inside the clip.
+    fn clamped(self, duration: Duration) -> Self {
+        match self.span {
+            Some(span) if span < duration => Self {
+                start: self.start.min(duration - span),
+                span: Some(span),
+            },
+            _ => Self::WHOLE,
+        }
+    }
+
+    pub fn is_zoomed(&self) -> bool {
+        self.span.is_some()
+    }
+}
+
+/// Horizontal mapping between media time and pixels, for the part of the
+/// clip in view.
 #[derive(Clone, Copy)]
 struct Scale {
     left: Pixels,
     width: Pixels,
     duration: Duration,
+    start: Duration,
+    span: Duration,
 }
 
 impl Scale {
-    fn new(bounds: Bounds<Pixels>, duration: Duration) -> Self {
+    fn new(bounds: Bounds<Pixels>, duration: Duration, view: View) -> Self {
         Self {
             left: bounds.origin.x + px(INSET),
             width: (bounds.size.width - px(INSET * 2.)).max(px(1.)),
             duration,
+            start: view.start,
+            span: view.span(duration),
         }
     }
 
+    /// Where `time` falls, which may be outside the strip when zoomed in.
+    fn unclamped_x(&self, time: Duration) -> Pixels {
+        let offset = time.as_secs_f64() - self.start.as_secs_f64();
+        let fraction = offset / self.span.as_secs_f64().max(f64::EPSILON);
+        self.left + self.width * fraction as f32
+    }
+
+    /// Where `time` falls, pinned to the ends of the strip.
     fn x(&self, time: Duration) -> Pixels {
-        let fraction = time.as_secs_f64() / self.duration.as_secs_f64().max(f64::EPSILON);
-        self.left + self.width * fraction.clamp(0.0, 1.0) as f32
+        self.unclamped_x(time)
+            .max(self.left)
+            .min(self.left + self.width)
+    }
+
+    fn in_view(&self, time: Duration) -> bool {
+        time >= self.start && time <= self.start + self.span
     }
 
     fn time(&self, x: Pixels) -> Duration {
         let fraction = f32::from(x - self.left) / f32::from(self.width);
-        self.duration.mul_f64(fraction.clamp(0.0, 1.0) as f64)
+        (self.start + self.span.mul_f64(fraction.clamp(0.0, 1.0) as f64)).min(self.duration)
+    }
+
+    /// Seconds covered by one pixel.
+    fn seconds_per_pixel(&self) -> f64 {
+        self.span.as_secs_f64() / f64::from(f32::from(self.width))
     }
 }
 
@@ -217,6 +348,9 @@ pub fn render(state: TimelineState, cx: &mut Context<Player>) -> impl IntoElemen
         hover: white().opacity(0.5),
         marker: theme.cyan,
         knob_border: black().opacity(0.35),
+        tick: white().opacity(0.55),
+        overview: theme.muted_foreground.opacity(0.35),
+        overview_view: theme.muted_foreground,
     };
     let this = cx.entity().downgrade();
 
@@ -226,31 +360,38 @@ pub fn render(state: TimelineState, cx: &mut Context<Player>) -> impl IntoElemen
             let Some(duration) = state.duration.filter(|duration| !duration.is_zero()) else {
                 return;
             };
-            let scale = Scale::new(bounds, duration);
+            let scale = Scale::new(bounds, duration, state.view);
             let strip = Bounds {
                 origin: point(scale.left, bounds.origin.y + px(STRIP_TOP)),
                 size: size(scale.width, px(STRIP_HEIGHT)),
             };
+            let in_view = |time: Duration| scale.in_view(time).then(|| scale.x(time));
             let layout = state
                 .segments
                 .as_ref()
                 .map(|segments| Layout::new(&scale, segments));
             let handles = layout.as_ref().map(Layout::handles);
 
-            paint_filmstrip(window, strip, &state, &colors);
+            paint_filmstrip(window, strip, &scale, &state, &colors);
             if let Some(peaks) = &state.waveform {
-                paint_waveform(window, strip, peaks, &colors);
+                paint_waveform(window, strip, &scale, peaks, &colors);
             }
+            paint_ticks(window, strip, &scale, state.frame_interval, &colors);
             if let Some(layout) = &layout {
                 paint_selection(window, strip, layout, &colors);
             }
-            if let Some(hover) = state.hover {
-                paint_hover(window, strip, scale.x(hover), &colors);
+            if let Some(x) = state.hover.and_then(in_view) {
+                paint_hover(window, strip, x, &colors);
             }
-            for marker in &state.markers {
-                paint_marker(window, strip, scale.x(*marker), &colors);
+            for x in state.markers.iter().filter_map(|marker| in_view(*marker)) {
+                paint_marker(window, strip, x, &colors);
             }
-            paint_playhead(window, strip, scale.x(state.position), &colors);
+            if state.view.is_zoomed() {
+                paint_overview(window, bounds, strip, &scale, &colors);
+            }
+            if let Some(x) = in_view(state.position) {
+                paint_playhead(window, strip, x, &colors);
+            }
 
             let hovered = hitbox
                 .is_hovered(window)
@@ -278,11 +419,15 @@ struct Colors {
     hover: Hsla,
     marker: Hsla,
     knob_border: Hsla,
+    tick: Hsla,
+    overview: Hsla,
+    overview_view: Hsla,
 }
 
 fn paint_filmstrip(
     window: &mut Window,
     strip: Bounds<Pixels>,
+    scale: &Scale,
     state: &TimelineState,
     colors: &Colors,
 ) {
@@ -291,39 +436,120 @@ fn paint_filmstrip(
     if count == 0 {
         return;
     }
-    let tile_width = strip.size.width / count as f32;
+    // Tiles are spread over the whole clip; zoomed in, only some show and
+    // they are stretched.
+    let tile_width =
+        (scale.unclamped_x(scale.duration) - scale.unclamped_x(Duration::ZERO)) / count as f32;
+    let first_x = scale.unclamped_x(Duration::ZERO);
+    let zoomed = state.view.is_zoomed();
     // Tiles keep the video's aspect ratio and are cropped to their slot.
     let image_width = (strip.size.height * state.aspect_ratio).max(tile_width);
     let image_height = image_width / state.aspect_ratio;
-    for (index, tile) in state.filmstrip.iter().enumerate() {
-        let Some(tile) = tile else { continue };
-        let slot = Bounds {
-            origin: point(strip.origin.x + tile_width * index as f32, strip.origin.y),
-            size: size(tile_width, strip.size.height),
-        };
-        let image = Bounds {
-            origin: point(
-                slot.center().x - image_width / 2.,
-                slot.center().y - image_height / 2.,
-            ),
-            size: size(image_width, image_height),
-        };
-        let radius = px(RADIUS);
-        let corners = Corners {
-            top_left: if index == 0 { radius } else { px(0.) },
-            bottom_left: if index == 0 { radius } else { px(0.) },
-            top_right: if index + 1 == count { radius } else { px(0.) },
-            bottom_right: if index + 1 == count { radius } else { px(0.) },
-        };
-        window
-            .paint_image(slot, image, corners, tile.clone(), 0, false)
-            .ok();
+    let mask = ContentMask { bounds: strip };
+    window.with_content_mask(Some(mask), |window| {
+        for (index, tile) in state.filmstrip.iter().enumerate() {
+            let Some(tile) = tile else { continue };
+            let slot = Bounds {
+                origin: point(first_x + tile_width * index as f32, strip.origin.y),
+                size: size(tile_width, strip.size.height),
+            };
+            if slot.origin.x > strip.origin.x + strip.size.width
+                || slot.origin.x + slot.size.width < strip.origin.x
+            {
+                continue;
+            }
+            let image = Bounds {
+                origin: point(
+                    slot.center().x - image_width / 2.,
+                    slot.center().y - image_height / 2.,
+                ),
+                size: size(image_width, image_height),
+            };
+            let radius = px(RADIUS);
+            let (first, last) = (index == 0 && !zoomed, index + 1 == count && !zoomed);
+            let corners = Corners {
+                top_left: if first { radius } else { px(0.) },
+                bottom_left: if first { radius } else { px(0.) },
+                top_right: if last { radius } else { px(0.) },
+                bottom_right: if last { radius } else { px(0.) },
+            };
+            window
+                .paint_image(slot, image, corners, tile.clone(), 0, false)
+                .ok();
+        }
+    });
+}
+
+/// A tick per frame along the top of the strip, once frames are far
+/// enough apart to tell apart; every fifth one is longer.
+fn paint_ticks(
+    window: &mut Window,
+    strip: Bounds<Pixels>,
+    scale: &Scale,
+    frame_interval: Duration,
+    colors: &Colors,
+) {
+    let interval = frame_interval.as_secs_f64();
+    if interval <= 0.0 || interval / scale.seconds_per_pixel() < f64::from(FRAME_TICK_SPACING) {
+        return;
     }
+    let first = (scale.start.as_secs_f64() / interval).ceil() as u64;
+    let last = ((scale.start + scale.span).as_secs_f64() / interval).floor() as u64;
+    for frame in first..=last {
+        let x = scale.x(Duration::from_secs_f64(frame as f64 * interval));
+        let height = if frame % 5 == 0 { px(9.) } else { px(5.) };
+        let tick = Bounds {
+            origin: point(x - px(0.5), strip.origin.y),
+            size: size(px(1.), height),
+        };
+        window.paint_quad(fill(tick, colors.tick));
+    }
+}
+
+/// A thin bar under the strip: the whole clip, with the part in view
+/// highlighted.
+fn paint_overview(
+    window: &mut Window,
+    bounds: Bounds<Pixels>,
+    strip: Bounds<Pixels>,
+    scale: &Scale,
+    colors: &Colors,
+) {
+    let top = bounds.origin.y + bounds.size.height - px(OVERVIEW_HEIGHT + 1.);
+    let track = Bounds {
+        origin: point(strip.origin.x, top),
+        size: size(strip.size.width, px(OVERVIEW_HEIGHT)),
+    };
+    window.paint_quad(fill(track, colors.overview).corner_radii(px(OVERVIEW_HEIGHT / 2.)));
+    let total = scale.duration.as_secs_f64().max(f64::EPSILON);
+    let from = (scale.start.as_secs_f64() / total) as f32;
+    let to = ((scale.start + scale.span).as_secs_f64() / total) as f32;
+    let view = Bounds {
+        origin: point(strip.origin.x + strip.size.width * from, top),
+        size: size(
+            (strip.size.width * (to - from)).max(px(4.)),
+            px(OVERVIEW_HEIGHT),
+        ),
+    };
+    window.paint_quad(fill(view, colors.overview_view).corner_radii(px(OVERVIEW_HEIGHT / 2.)));
 }
 
 /// Bars mirrored around the middle of a dark band along the strip's bottom,
 /// over the thumbnails and under the trim range.
-fn paint_waveform(window: &mut Window, strip: Bounds<Pixels>, peaks: &[f32], colors: &Colors) {
+fn paint_waveform(
+    window: &mut Window,
+    strip: Bounds<Pixels>,
+    scale: &Scale,
+    peaks: &[f32],
+    colors: &Colors,
+) {
+    // Only the peaks of the part in view.
+    let total = scale.duration.as_secs_f64().max(f64::EPSILON);
+    let index =
+        |time: Duration| ((time.as_secs_f64() / total) * peaks.len() as f64).round() as usize;
+    let from = index(scale.start).min(peaks.len());
+    let to = index(scale.start + scale.span).clamp(from, peaks.len());
+    let peaks = if to > from { &peaks[from..to] } else { peaks };
     let band = Bounds {
         origin: point(
             strip.origin.x,
@@ -512,6 +738,7 @@ fn register_dragging(
     });
     window.on_mouse_event({
         let this = this.clone();
+        let hitbox = hitbox.clone();
         move |event: &MouseMoveEvent, phase, window, cx| {
             if phase != DispatchPhase::Bubble {
                 return;
@@ -535,6 +762,29 @@ fn register_dragging(
             .ok();
         }
     });
+    window.on_mouse_event({
+        let this = this.clone();
+        let hitbox = hitbox.clone();
+        move |event: &ScrollEvent, phase, window, cx| {
+            if phase != DispatchPhase::Bubble || !hitbox.is_hovered(window) {
+                return;
+            }
+            let delta = event.delta.pixel_delta(px(20.));
+            let (dx, dy) = (f32::from(delta.x), f32::from(delta.y));
+            this.update(cx, |player, cx| {
+                if event.modifiers.shift || dx.abs() > dy.abs() {
+                    // Scrolling right, or down with Shift, moves later.
+                    let pixels = if dx.abs() > dy.abs() { -dx } else { -dy };
+                    player.pan_timeline(f64::from(pixels) * scale.seconds_per_pixel(), cx);
+                } else if dy != 0.0 {
+                    let factor = WHEEL_ZOOM.powf(f64::from(dy) / 20.0);
+                    player.zoom_timeline(factor, scale.time(event.position.x), cx);
+                }
+            })
+            .ok();
+            cx.stop_propagation();
+        }
+    });
     window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
         if phase != DispatchPhase::Bubble || event.button != MouseButton::Left {
             return;
@@ -552,7 +802,7 @@ mod tests {
 
     use gpui_kit::{Bounds, point, px, size};
 
-    use super::{Drag, HEIGHT, INSET, Layout, STRIP_TOP, Scale, Span};
+    use super::{Drag, HEIGHT, INSET, Layout, STRIP_TOP, Scale, Span, View};
     use crate::trim::{Segments, TrimRange};
 
     fn scale() -> Scale {
@@ -560,7 +810,62 @@ mod tests {
             origin: point(px(0.), px(0.)),
             size: size(px(1000. + INSET * 2.), px(HEIGHT)),
         };
-        Scale::new(bounds, Duration::from_secs(100))
+        Scale::new(bounds, Duration::from_secs(100), View::WHOLE)
+    }
+
+    #[test]
+    fn zoomed_scale_maps_the_view_onto_the_strip() {
+        let bounds = Bounds {
+            origin: point(px(0.), px(0.)),
+            size: size(px(1000. + INSET * 2.), px(HEIGHT)),
+        };
+        let view = View {
+            start: Duration::from_secs(40),
+            span: Some(Duration::from_secs(10)),
+        };
+        let scale = Scale::new(bounds, Duration::from_secs(100), view);
+        assert_eq!(scale.x(Duration::from_secs(45)), px(INSET + 500.));
+        assert_eq!(scale.time(px(INSET + 1000.)), Duration::from_secs(50));
+        assert!(!scale.in_view(Duration::from_secs(60)));
+        assert_eq!(scale.x(Duration::from_secs(60)), px(INSET + 1000.));
+    }
+
+    #[test]
+    fn zooming_keeps_the_anchor_in_place_and_stays_inside_the_clip() {
+        let duration = Duration::from_secs(100);
+        let min = Duration::from_secs(1);
+        let view = View::WHOLE.zoom(4.0, Duration::from_secs(50), duration, min);
+        assert_eq!(view.span, Some(Duration::from_secs(25)));
+        assert_eq!(view.start, Duration::from_millis(37_500));
+        // Zooming in near the end does not scroll past it.
+        let view = View::WHOLE.zoom(10.0, Duration::from_secs(100), duration, min);
+        assert_eq!(view.start, Duration::from_secs(90));
+        // Never closer than the minimum span, and back out to the whole.
+        let close = view.zoom(1000.0, Duration::from_secs(95), duration, min);
+        assert_eq!(close.span, Some(min));
+        assert_eq!(
+            close.zoom(0.001, Duration::ZERO, duration, min),
+            View::WHOLE
+        );
+    }
+
+    #[test]
+    fn following_pages_the_view_to_the_playhead() {
+        let duration = Duration::from_secs(100);
+        let view = View {
+            start: Duration::from_secs(10),
+            span: Some(Duration::from_secs(10)),
+        };
+        assert_eq!(view.follow(Duration::from_secs(15), duration), view);
+        assert_eq!(
+            view.follow(Duration::from_secs(20), duration).start,
+            Duration::from_secs(19)
+        );
+        assert_eq!(
+            view.follow(Duration::from_secs(5), duration).start,
+            Duration::from_secs(0)
+        );
+        assert_eq!(view.pan(1000.0, duration).start, Duration::from_secs(90));
     }
 
     #[test]

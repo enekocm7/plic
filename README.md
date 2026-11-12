@@ -83,6 +83,10 @@ Finished exports stay listed under the queue: copy one to the clipboard
 as a file (paste it straight into Discord or Explorer) or show it in its
 folder. `Ctrl+Shift+C` copies the latest one.
 
+Zoom the timeline with the mouse wheel (around the pointer) or `=` and `-`
+(around the playhead) to trim long recordings precisely; `0` shows the
+whole clip again. Shift with the wheel scrolls along it, the view follows
+the playhead, and once frames are far enough apart each one gets a tick.
 The speed button next to the loop toggle plays at 0.5x, 1x, 1.5x or 2x;
 the sound keeps its pitch. `J`, `K` and `L` work as a shuttle: `L` plays
 forward and each further press goes faster, `J` plays backward the same

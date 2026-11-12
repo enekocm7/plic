@@ -87,6 +87,30 @@ pub const COMMANDS: &[Command] = &[
         "Play forward; press again to go faster"
     ),
     command!(
+        "zoom_in",
+        "Playback",
+        ZoomIn,
+        Keys,
+        ["=", "+"],
+        "Zoom the timeline in"
+    ),
+    command!(
+        "zoom_out",
+        "Playback",
+        ZoomOut,
+        Keys,
+        ["-"],
+        "Zoom the timeline out"
+    ),
+    command!(
+        "zoom_to_fit",
+        "Playback",
+        ZoomToFit,
+        Keys,
+        ["0"],
+        "Show the whole clip on the timeline"
+    ),
+    command!(
         "step_backward",
         "Playback",
         StepBackward,

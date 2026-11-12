@@ -22,7 +22,7 @@ use super::{
     Reload, ResetTrim, SaveFrame, SaveFrameJpeg, SeekBackward, SeekForward, SelectNextClip,
     SelectPreviousClip, ShowSettings, ShowShortcuts, ShuttleBackward, ShuttleForward,
     SplitAtPlayhead, StepBackward, StepForward, ToggleFullscreen, ToggleLoop, ToggleMarker,
-    ToggleMute, TogglePlay, ToggleTheme, TrimToMarkers,
+    ToggleMute, TogglePlay, ToggleTheme, TrimToMarkers, ZoomIn, ZoomOut, ZoomToFit,
     clip_filter::ClipFilter,
     editor::Editor,
     frame_image,
@@ -801,6 +801,18 @@ impl PlicApp {
             .update(cx, |player, cx| player.trim_between_markers(cx));
     }
 
+    fn zoom_in(&mut self, _: &ZoomIn, _: &mut Window, cx: &mut Context<Self>) {
+        self.player.update(cx, |player, cx| player.zoom_in(cx));
+    }
+
+    fn zoom_out(&mut self, _: &ZoomOut, _: &mut Window, cx: &mut Context<Self>) {
+        self.player.update(cx, |player, cx| player.zoom_out(cx));
+    }
+
+    fn zoom_to_fit(&mut self, _: &ZoomToFit, _: &mut Window, cx: &mut Context<Self>) {
+        self.player.update(cx, |player, cx| player.zoom_to_fit(cx));
+    }
+
     fn toggle_fullscreen(
         &mut self,
         _: &ToggleFullscreen,
@@ -1204,6 +1216,9 @@ impl Render for PlicApp {
             .on_action(cx.listener(Self::previous_marker))
             .on_action(cx.listener(Self::trim_to_markers))
             .on_action(cx.listener(Self::toggle_fullscreen))
+            .on_action(cx.listener(Self::zoom_in))
+            .on_action(cx.listener(Self::zoom_out))
+            .on_action(cx.listener(Self::zoom_to_fit))
             .on_action(cx.listener(Self::exit_fullscreen))
             .on_action(cx.listener(Self::mark_in))
             .on_action(cx.listener(Self::mark_out))
