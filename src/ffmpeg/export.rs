@@ -12,7 +12,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
-        Arc, OnceLock,
+        Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
@@ -23,84 +23,13 @@ use anyhow::{Context, Result, bail};
 
 use super::{
     CommandExt as _, FrameSize, Transform,
+    encoder::{self, VideoEncoding},
     graph::{self, AudioAdjust, AudioPlan},
     seconds_arg,
 };
 use crate::trim::TrimRange;
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
-static ENCODER: OnceLock<&'static Encoder> = OnceLock::new();
-
-struct Encoder {
-    args: &'static [&'static str],
-}
-
-// Hardware encoders first; software x264 is the fallback and always works.
-const ENCODERS: [Encoder; 4] = [
-    Encoder {
-        args: &[
-            "-c:v", "h264_amf", "-quality", "balanced", "-rc", "cqp", "-qp_i", "20", "-qp_p", "20",
-        ],
-    },
-    Encoder {
-        args: &[
-            "-c:v",
-            "h264_nvenc",
-            "-preset",
-            "p4",
-            "-rc",
-            "vbr",
-            "-cq",
-            "20",
-            "-b:v",
-            "0",
-        ],
-    },
-    Encoder {
-        args: &[
-            "-c:v",
-            "h264_qsv",
-            "-preset",
-            "fast",
-            "-global_quality",
-            "20",
-        ],
-    },
-    Encoder {
-        args: &["-c:v", "libx264", "-preset", "fast", "-crf", "20"],
-    },
-];
-
-/// Picks the first encoder that can actually encode a test clip on this machine.
-fn encoder() -> &'static Encoder {
-    ENCODER.get_or_init(|| {
-        ENCODERS
-            .iter()
-            .find(|candidate| works(candidate))
-            .unwrap_or(&ENCODERS[ENCODERS.len() - 1])
-    })
-}
-
-fn works(encoder: &Encoder) -> bool {
-    Command::new("ffmpeg")
-        .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i"])
-        .arg("color=c=black:s=640x360:r=30:d=0.5,format=yuv420p")
-        .args(encoder.args)
-        .args(["-f", "null", "-"])
-        .no_window()
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
-}
-
-/// Probes the encoders on a background thread so the first export does not
-/// pay for it.
-pub fn warm_up_encoder() {
-    thread::spawn(encoder);
-}
-
 /// How the trimmed range is written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ExportMode {
@@ -120,6 +49,8 @@ pub struct ExportRequest {
     /// The parts of the source to keep, joined in this order. Never empty.
     pub ranges: Vec<TrimRange>,
     pub mode: ExportMode,
+    /// Codec and quality of a re-encoded video.
+    pub video: VideoEncoding,
     /// Length of the source, used to report progress for open-ended ranges.
     pub source_duration: Option<Duration>,
     /// Audio streams (`0:a:N`) to keep, mixed into one when there are
@@ -229,7 +160,7 @@ pub fn export(
                     audio,
                 ))
                 .args(["-map", "[v]"])
-                .args(encoder().args);
+                .args(encoder::video_args(request.video));
             if !audio.is_silent() {
                 command.args(["-map", "[a]", "-c:a", "aac", "-b:a", "192k"]);
             }

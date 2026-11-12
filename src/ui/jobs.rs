@@ -133,6 +133,7 @@ impl PlicApp {
                     output,
                     ranges,
                     // Cropping and rotating are filters, so they re-encode.
+                    video: self.editor.video,
                     mode: if entry.transform.is_identity() {
                         self.editor.mode
                     } else {
