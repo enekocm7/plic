@@ -13,9 +13,18 @@ on:
       - build.rs
       - .github/workflows/warm-cache.yml
       - .github/workflows/release.yml
+  # Checks a change to this workflow; the cache is only saved on master.
+  pull_request:
+    paths:
+      - .github/workflows/warm-cache.yml
   # Run by hand after a new stable Rust, which changes the cache key.
   workflow_dispatch:
 
+concurrency:
+  group: warm-cache-${{ github.ref }}
+  cancel-in-progress: true
+
+# Must match release.yml: CARGO* variables are part of the cache key.
 env:
   CARGO_TERM_COLOR: always
 
@@ -32,6 +41,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: release
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       # Only the dependencies are cached (rust-cache drops plic's own build
       # output), so swap in an empty main: cargo still builds every
