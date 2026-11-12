@@ -3,15 +3,18 @@
 //! plic: watch, trim and file away video clips.
 
 mod audio;
+mod clip_order;
 mod clipboard;
 mod ffmpeg;
 mod library;
+mod markers;
 mod playback;
 mod scheduler;
 mod settings;
 mod timestamp;
 mod trim;
 mod ui;
+mod watcher;
 mod worker;
 
 use std::path::PathBuf;
