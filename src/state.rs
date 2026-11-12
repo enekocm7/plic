@@ -30,6 +30,10 @@ pub struct State {
     pub window: Option<WindowRect>,
     pub volume: f32,
     pub dark_theme: bool,
+    /// A release version the user dismissed, so it is not offered again.
+    pub dismissed_update: Option<String>,
+    /// Unix seconds of the last successful update check.
+    pub last_update_check: Option<u64>,
 }
 
 impl Default for State {
@@ -39,6 +43,8 @@ impl Default for State {
             window: None,
             volume: 0.8,
             dark_theme: true,
+            dismissed_update: None,
+            last_update_check: None,
         }
     }
 }

@@ -16,6 +16,7 @@ mod state;
 mod timestamp;
 mod trim;
 mod ui;
+mod updates;
 mod watcher;
 mod worker;
 

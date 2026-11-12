@@ -112,6 +112,12 @@ single source of the version; the release fails if the tag does not match it.
 The workflow publishes a GitHub release with an installer
 (`plic-<version>-setup.exe`), a portable `.zip` and `SHA256SUMS.txt`.
 
+plic checks for a newer release when it starts, at most once every six
+hours, and shows a banner linking to the release page. Dismissing a version
+hides it until an even newer one is published; the download button in the
+title bar checks again by hand. Nothing is downloaded or installed
+automatically.
+
 To build the installer locally, install [Inno Setup](https://jrsoftware.org/isinfo.php)
 and run:
 

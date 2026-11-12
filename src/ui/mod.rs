@@ -11,6 +11,7 @@ mod player;
 mod settings_panel;
 mod shortcuts;
 mod timeline;
+mod update;
 mod volume;
 
 use std::path::PathBuf;
