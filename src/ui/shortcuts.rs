@@ -25,6 +25,8 @@ const GROUPS: &[Group] = &[
             (&["b"], "Add or remove a marker"),
             (&["[", "]"], "Previous or next marker"),
             (&["shift-b"], "Trim to the markers around the playhead"),
+            (&["f", "f11"], "Fullscreen viewer"),
+            (&["escape"], "Leave fullscreen"),
         ],
     ),
     (

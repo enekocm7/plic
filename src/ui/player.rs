@@ -33,6 +33,8 @@ use crate::{
 };
 
 /// Decode size used before the viewer has been laid out.
+/// How long the mouse rests before fullscreen hides the controls.
+const CONTROLS_IDLE: Duration = Duration::from_secs(2);
 const DEFAULT_VIEWPORT: FrameSize = FrameSize::new(1280, 720);
 
 /// How long the viewport must stay the same size before playback restarts
@@ -162,6 +164,10 @@ pub struct Player {
     audio: AudioDevice,
     volume: f32,
     muted: bool,
+    /// Whether the viewer fills the window, with the controls tucked away.
+    fullscreen: bool,
+    /// When the mouse last moved over the viewer, for hiding the controls.
+    last_activity: Instant,
     /// Whether the volume slider is being dragged.
     pub(super) dragging_volume: bool,
 }
@@ -199,6 +205,8 @@ impl Player {
             audio: AudioDevice::Unopened,
             volume,
             muted: false,
+            fullscreen: false,
+            last_activity: Instant::now(),
             dragging_volume: false,
         }
     }
@@ -408,6 +416,34 @@ impl Player {
             position + interval * frames as u32
         };
         self.seek(target, window, cx);
+    }
+
+    pub fn set_fullscreen(&mut self, fullscreen: bool, cx: &mut Context<Self>) {
+        self.fullscreen = fullscreen;
+        if fullscreen {
+            self.wake_controls(cx);
+        }
+        cx.notify();
+    }
+
+    /// Shows the controls and hides them again once the mouse rests.
+    fn wake_controls(&mut self, cx: &mut Context<Self>) {
+        let was_hidden = !self.controls_visible();
+        self.last_activity = Instant::now();
+        if was_hidden {
+            cx.notify();
+        }
+        if self.fullscreen {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(CONTROLS_IDLE).await;
+                this.update(cx, |_, cx| cx.notify()).ok();
+            })
+            .detach();
+        }
+    }
+
+    fn controls_visible(&self) -> bool {
+        !self.fullscreen || self.last_activity.elapsed() < CONTROLS_IDLE
     }
 
     pub fn toggle_mute(&mut self, cx: &mut Context<Self>) {
@@ -1246,12 +1282,18 @@ impl Render for Player {
             window.drop_image(frame).ok();
         }
         let (background, border) = (cx.theme().background, cx.theme().border);
+        let controls = self.source.is_some() && self.controls_visible();
         v_flex()
             .size_full()
             .bg(background)
+            .on_mouse_move(cx.listener(|this, _, _, cx| {
+                if this.fullscreen {
+                    this.wake_controls(cx);
+                }
+            }))
             .child(self.render_stage(cx))
             // Controls only make sense with something to control.
-            .when(self.source.is_some(), |player| {
+            .when(controls, |player| {
                 player.child(
                     v_flex()
                         .flex_none()
