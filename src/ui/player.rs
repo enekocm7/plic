@@ -2,10 +2,13 @@
 
 use std::{
     cell::Cell,
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
     rc::Rc,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -26,6 +29,7 @@ use super::{
 use crate::{
     audio::AudioOutput,
     ffmpeg::{self, CropRect, FrameSize, MediaInfo},
+    frame_cache::{FrameCache, FrameKey},
     markers::Markers,
     playback::{Playback, SPEEDS},
     timestamp,
@@ -41,6 +45,12 @@ const DEFAULT_VIEWPORT: FrameSize = FrameSize::new(1280, 720);
 /// How long the viewport must stay the same size before playback restarts
 /// at the new resolution; avoids restarting on every step of a resize drag.
 const RESIZE_SETTLE: Duration = Duration::from_millis(250);
+
+/// How long a clip must stay open before its filmstrip and waveform are
+/// worked out, so flipping through clips only ever decodes their first frame.
+const EXTRAS_DELAY: Duration = Duration::from_millis(250);
+/// Memory the cache of first frames may use: about 17 frames at 1280x720.
+const FIRST_FRAME_BUDGET: usize = 64 << 20;
 
 /// Thumbnails along the timeline.
 const FILMSTRIP_TILES: usize = 12;
@@ -154,6 +164,22 @@ pub struct Player {
     source: Option<Source>,
     /// Bumped whenever the source changes, so late decodes are discarded.
     generation: u64,
+    /// `generation` as background jobs see it: they skip their work once it
+    /// has moved on, instead of running ffmpeg for a clip nobody is viewing.
+    live_generation: Arc<AtomicU64>,
+    /// Decodes of the frame shown for the playhead.
+    still_workers: WorkerPool,
+    /// The first frames of clips viewed or about to be, newest last.
+    first_frames: FrameCache,
+    prefetch_workers: WorkerPool,
+    /// Bumped on every `load`, ending prefetches queued for the clip before.
+    prefetch_epoch: Arc<AtomicU64>,
+    prefetching: HashSet<FrameKey>,
+    /// Clips to prefetch once the frame on screen is up: decoding them
+    /// sooner would slow it down.
+    deferred_prefetch: Vec<(PathBuf, MediaInfo, Duration)>,
+    /// Whether the filmstrip and waveform still wait for the first frame.
+    extras_pending: bool,
     playback: Option<Playback>,
     /// The playhead while no playback is running.
     position: Duration,
@@ -213,6 +239,14 @@ impl Player {
         Self {
             source: None,
             generation: 0,
+            live_generation: Arc::new(AtomicU64::new(0)),
+            still_workers: WorkerPool::new("still", 2),
+            first_frames: FrameCache::new(FIRST_FRAME_BUDGET),
+            prefetch_workers: WorkerPool::new("prefetch", 1),
+            prefetch_epoch: Arc::new(AtomicU64::new(0)),
+            prefetching: HashSet::new(),
+            deferred_prefetch: Vec::new(),
+            extras_pending: false,
             playback: None,
             position: Duration::ZERO,
             frame: None,
@@ -266,14 +300,93 @@ impl Player {
             return;
         }
         self.unload();
+        self.prefetch_epoch.fetch_add(1, Ordering::Relaxed);
         self.source = Some(Source { path, info });
         let start = segments.active().start;
         self.segments = segments;
         self.position = start;
-        self.request_still(start, cx);
-        self.request_filmstrip(cx);
-        self.request_waveform(cx);
+        self.show_first_frame(start, cx);
         cx.notify();
+    }
+
+    /// Shows the frame at `start`, from the cache when it has it. The
+    /// filmstrip and waveform come after it, so they never compete with it.
+    fn show_first_frame(&mut self, start: Duration, cx: &mut Context<Self>) {
+        let Some(source) = &self.source else {
+            return;
+        };
+        let cached = FrameKey::new(&source.path, start, self.decode_size(source))
+            .and_then(|key| self.first_frames.get(&key));
+        if let Some(frame) = cached {
+            self.show_frame(frame);
+            self.start_extras(cx);
+        } else if source.info.video_size.is_none() {
+            self.start_extras(cx);
+        } else {
+            self.extras_pending = true;
+            self.request_still(start, cx);
+        }
+    }
+
+    /// Works out the filmstrip and waveform once the clip has stayed open
+    /// for a moment.
+    fn start_extras(&mut self, cx: &mut Context<Self>) {
+        let generation = self.generation;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(EXTRAS_DELAY).await;
+            this.update(cx, |this, cx| {
+                if this.generation == generation {
+                    this.request_filmstrip(cx);
+                    this.request_waveform(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Decodes the first frame of a clip that is likely to be opened next, so
+    /// it appears at once when it is.
+    pub fn prefetch(
+        &mut self,
+        path: PathBuf,
+        info: &MediaInfo,
+        start: Duration,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_playing() || info.video_size.is_none() {
+            return;
+        }
+        if self.extras_pending {
+            self.deferred_prefetch.push((path, info.clone(), start));
+            return;
+        }
+        let size = self.decode_size_of(info);
+        let Some(key) = FrameKey::new(&path, start, size) else {
+            return;
+        };
+        if self.first_frames.contains(&key) || !self.prefetching.insert(key.clone()) {
+            return;
+        }
+        let epoch = Arc::clone(&self.prefetch_epoch);
+        let queued_at = epoch.load(Ordering::Relaxed);
+        let job = self.prefetch_workers.run(move || {
+            if epoch.load(Ordering::Relaxed) != queued_at {
+                anyhow::bail!("another clip was opened");
+            }
+            ffmpeg::extract_frame(&path, start, size)
+        });
+        cx.spawn(async move |this, cx| {
+            let frame = job.await;
+            this.update(cx, |this, _| {
+                this.prefetching.remove(&key);
+                if let Ok(Ok(frame)) = frame {
+                    this.first_frames.insert(key, frame);
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Shows nothing, e.g. while a clip's details are still loading.
@@ -306,6 +419,10 @@ impl Player {
         let hover_frames = std::mem::take(&mut self.hover_frames);
         self.stale_frames.extend(hover_frames.frames.into_values());
         self.generation += 1;
+        self.live_generation
+            .store(self.generation, Ordering::Relaxed);
+        self.extras_pending = false;
+        self.deferred_prefetch.clear();
         self.stop_rewind();
         self.source = None;
         self.playback = None;
@@ -1141,9 +1258,13 @@ impl Player {
         for index in 0..FILMSTRIP_TILES {
             let at = duration.mul_f64((index as f64 + 0.5) / FILMSTRIP_TILES as f64);
             let path = source.path.clone();
-            let job = self
-                .filmstrip_workers
-                .run(move || ffmpeg::extract_keyframe(&path, at, size));
+            let live = Arc::clone(&self.live_generation);
+            let job = self.filmstrip_workers.run(move || {
+                if live.load(Ordering::Relaxed) != generation {
+                    anyhow::bail!("another clip was opened");
+                }
+                ffmpeg::extract_keyframe(&path, at, size)
+            });
             cx.spawn(async move |this, cx| {
                 let Ok(Ok(frame)) = job.await else {
                     return;
@@ -1164,10 +1285,12 @@ impl Player {
     }
 
     fn decode_size(&self, source: &Source) -> FrameSize {
+        self.decode_size_of(&source.info)
+    }
+
+    fn decode_size_of(&self, info: &MediaInfo) -> FrameSize {
         let viewport = self.viewport.get().unwrap_or(DEFAULT_VIEWPORT);
-        source
-            .info
-            .video_size
+        info.video_size
             .unwrap_or(DEFAULT_VIEWPORT)
             .fit_within(viewport)
     }
@@ -1200,24 +1323,42 @@ impl Player {
         let path = source.path.clone();
         let size = self.decode_size(source);
         let generation = self.generation;
+        let live = Arc::clone(&self.live_generation);
+        // Decodes queued for a clip that has been closed again are skipped
+        // without starting ffmpeg, which matters when flipping through clips.
+        let job = self.still_workers.run(move || {
+            if live.load(Ordering::Relaxed) != generation {
+                anyhow::bail!("another clip was opened");
+            }
+            match quality {
+                StillQuality::Exact => ffmpeg::extract_frame(&path, at, size),
+                StillQuality::Fast => ffmpeg::extract_keyframe(&path, at, size),
+            }
+        });
         cx.spawn(async move |this, cx| {
-            let frame = cx
-                .background_spawn(async move {
-                    match quality {
-                        StillQuality::Exact => ffmpeg::extract_frame(&path, at, size),
-                        StillQuality::Fast => ffmpeg::extract_keyframe(&path, at, size),
-                    }
-                })
-                .await;
+            let Ok(frame) = job.await else {
+                return;
+            };
             this.update(cx, |this, cx| {
                 if this.generation != generation {
                     return;
                 }
                 this.stills.in_flight = false;
+                if std::mem::take(&mut this.extras_pending) {
+                    this.start_extras(cx);
+                    for (path, info, start) in std::mem::take(&mut this.deferred_prefetch) {
+                        this.prefetch(path, &info, start, cx);
+                    }
+                }
                 // A frame from before playback resumed would jump backwards.
                 if this.playback.is_none() {
                     match frame {
-                        Ok(frame) => this.show_frame(frame),
+                        Ok(frame) => {
+                            if quality == StillQuality::Exact {
+                                this.remember_first_frame(&frame, at, size);
+                            }
+                            this.show_frame(frame);
+                        }
                         // A quick frame that fails is followed by an exact one.
                         Err(_) if quality == StillQuality::Fast => {}
                         Err(error) => this.error = Some(format!("{error:#}").into()),
@@ -1233,6 +1374,19 @@ impl Player {
             .ok();
         })
         .detach();
+    }
+
+    /// Keeps the exact frame at the start of the active segment, the one
+    /// shown whenever the clip is opened again.
+    fn remember_first_frame(&mut self, frame: &ffmpeg::RawFrame, at: Duration, size: FrameSize) {
+        if at != self.segments.active().start || frame.size != size {
+            return;
+        }
+        if let Some(source) = &self.source
+            && let Some(key) = FrameKey::new(&source.path, at, size)
+        {
+            self.first_frames.insert(key, frame.clone());
+        }
     }
 
     fn show_frame(&mut self, frame: ffmpeg::RawFrame) {

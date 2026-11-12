@@ -9,6 +9,7 @@ mod clip_order;
 mod clipboard;
 mod drafts;
 mod ffmpeg;
+mod frame_cache;
 mod library;
 mod markers;
 mod naming;

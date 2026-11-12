@@ -194,6 +194,8 @@ pub struct PlicApp {
     settled_loaded: bool,
     pub(super) load_error: Option<SharedString>,
     workers: WorkerPool,
+    /// Clips being inspected ahead of the queue because they are on screen.
+    inspecting_now: HashSet<PathBuf>,
     /// Bumped on every folder load so results for an old folder are ignored.
     generation: u64,
     /// Images to evict from the GPU atlas on the next frame.
@@ -263,6 +265,7 @@ impl PlicApp {
             settled_loaded: false,
             load_error: None,
             workers: WorkerPool::new("inspect", 3),
+            inspecting_now: HashSet::new(),
             generation: 0,
             stale_images: Vec::new(),
             jobs: Vec::new(),
@@ -300,6 +303,7 @@ impl PlicApp {
         cx: &mut Context<Self>,
     ) {
         self.generation += 1;
+        self.inspecting_now.clear();
         let old_entries = std::mem::take(&mut self.clips)
             .into_iter()
             .chain(std::mem::take(&mut self.settled));
@@ -473,15 +477,38 @@ impl PlicApp {
         cx.notify();
     }
 
-    /// Probes a clip and decodes its thumbnail on the worker pool.
+    /// Probes a clip and decodes its thumbnail on the worker pool, where
+    /// clips wait their turn in the order they were found.
     fn load_details(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        let generation = self.generation;
         let job = self.workers.run({
             let path = path.clone();
             move || inspect(&path)
         });
+        self.apply_details(path, async move { job.await.ok() }, cx);
+    }
+
+    /// Probes the clip being viewed right away, ahead of the queue: with a
+    /// big folder, its turn in the queue could be many seconds away.
+    fn load_details_now(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if !self.inspecting_now.insert(path.clone()) {
+            return;
+        }
+        let task = cx.background_spawn({
+            let path = path.clone();
+            async move { inspect(&path) }
+        });
+        self.apply_details(path, async move { Some(task.await) }, cx);
+    }
+
+    fn apply_details(
+        &mut self,
+        path: PathBuf,
+        job: impl Future<Output = Option<(Details, Option<RawFrame>)>> + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let generation = self.generation;
         cx.spawn(async move |this, cx| {
-            let Ok((details, thumbnail)) = job.await else {
+            let Some((details, thumbnail)) = job.await else {
                 return;
             };
             let thumbnail = thumbnail.and_then(frame_image::render_image);
@@ -489,9 +516,15 @@ impl PlicApp {
                 if this.generation != generation {
                     return;
                 }
+                this.inspecting_now.remove(&path);
                 let Some(entry) = this.entry_mut(&path) else {
                     return;
                 };
+                // The same clip can be inspected twice, once ahead of the
+                // queue; the second answer adds nothing.
+                if matches!(entry.details, Details::Ready(_)) {
+                    return;
+                }
                 entry.details = details;
                 entry.thumbnail = thumbnail;
                 if this.viewed().is_some_and(|entry| entry.file.path == path) {
@@ -674,14 +707,43 @@ impl PlicApp {
                 let (info, segments) = (info.clone(), entry.segments.clone());
                 self.player
                     .update(cx, |player, cx| player.load(path, info, segments, cx));
+                self.prefetch_neighbours(cx);
             }
-            Details::Loading => self.player.update(cx, |player, cx| player.clear(cx)),
+            Details::Loading => {
+                self.player.update(cx, |player, cx| player.clear(cx));
+                self.load_details_now(path, cx);
+            }
             Details::Failed(error) => {
                 let message = format!("Could not read this video: {error}").into();
                 self.player
                     .update(cx, |player, cx| player.show_error(message, cx));
             }
         }
+    }
+
+    /// Has the player decode the first frames of the clips next to the
+    /// selected one, the likeliest to be opened next.
+    fn prefetch_neighbours(&mut self, cx: &mut Context<Self>) {
+        let Some(selected) = self.selected else {
+            return;
+        };
+        let neighbours: Vec<_> = [selected.checked_add(1), selected.checked_sub(1)]
+            .into_iter()
+            .flatten()
+            .filter_map(|index| self.clips.get(index))
+            .filter_map(|entry| {
+                Some((
+                    entry.file.path.clone(),
+                    entry.info()?.clone(),
+                    entry.segments.active().start,
+                ))
+            })
+            .collect();
+        self.player.update(cx, |player, cx| {
+            for (path, info, start) in neighbours {
+                player.prefetch(path, &info, start, cx);
+            }
+        });
     }
 
     fn on_player_event(

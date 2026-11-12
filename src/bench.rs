@@ -26,6 +26,10 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -38,6 +42,7 @@ use crate::{
         VideoEncoding, VideoStream,
     },
     trim::TrimRange,
+    worker::WorkerPool,
 };
 
 const SAMPLE_RATE: u32 = 48_000;
@@ -1116,5 +1121,196 @@ fn bench_export_sync() {
             let _ = fs::remove_file(&output);
         }
     }
+    report.finish();
+}
+
+// ---------------------------------------------------------------------------
+// Browsing a folder
+
+/// What opening a clip does besides decoding its first frame, as the player
+/// does it: a filmstrip of twelve keyframes and the waveform.
+fn background_extras(
+    path: &Path,
+    duration: Duration,
+    pool: &WorkerPool,
+    live: Option<(Arc<AtomicU64>, u64)>,
+) {
+    for index in 0..12 {
+        let (path, live) = (path.to_path_buf(), live.clone());
+        let at = duration.mul_f64((index as f64 + 0.5) / 12.0);
+        drop(pool.run(move || {
+            if let Some((live, generation)) = live
+                && live.load(Ordering::Relaxed) != generation
+            {
+                return;
+            }
+            let _ = ffmpeg::extract_keyframe(&path, at, FrameSize::new(192, 108));
+        }));
+    }
+    let path = path.to_path_buf();
+    thread::spawn(move || {
+        let _ = ffmpeg::audio_peaks(&path, duration, 1);
+    });
+}
+
+/// The player before this change: every opened clip starts its own decode at
+/// once, with the filmstrip and waveform queued behind it. Returns, for each
+/// clip, the time from opening it to its first frame.
+fn browse_eager(clips: &[PathBuf], interval: Duration, duration: Duration) -> Vec<f64> {
+    let filmstrip = WorkerPool::new("filmstrip", 2);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut opened = Vec::new();
+    for (index, clip) in clips.iter().enumerate() {
+        let (decoded, sender) = (clip.clone(), sender.clone());
+        opened.push(Instant::now());
+        thread::spawn(move || {
+            ffmpeg::extract_frame(&decoded, Duration::ZERO, VIEW).unwrap();
+            sender.send((index, Instant::now())).unwrap();
+        });
+        background_extras(clip, duration, &filmstrip, None);
+        thread::sleep(interval);
+    }
+    let mut latencies = vec![0.0; clips.len()];
+    for _ in clips {
+        let (index, done) = receiver.recv().unwrap();
+        latencies[index] = ms(done - opened[index]);
+    }
+    latencies
+}
+
+/// The player now: stale decodes are skipped, the filmstrip and waveform
+/// wait for the clip to stay open, and the neighbours' first frames are
+/// prefetched into the cache. Clips that were replaced before their frame
+/// arrived have no latency (NaN), as nobody saw them.
+fn browse_latest(clips: &[PathBuf], interval: Duration, duration: Duration) -> Vec<f64> {
+    use crate::frame_cache::{FrameCache, FrameKey};
+    let live = Arc::new(AtomicU64::new(0));
+    let epoch = Arc::new(AtomicU64::new(0));
+    let stills = WorkerPool::new("still", 2);
+    let prefetch = WorkerPool::new("prefetch", 1);
+    let filmstrip = WorkerPool::new("filmstrip", 2);
+    let cache = Arc::new(Mutex::new(FrameCache::new(64 << 20)));
+    let mut latencies = Vec::new();
+    for (index, clip) in clips.iter().enumerate() {
+        let generation = index as u64 + 1;
+        live.store(generation, Ordering::Relaxed);
+        epoch.fetch_add(1, Ordering::Relaxed);
+        let opened = Instant::now();
+        let key = FrameKey::new(clip, Duration::ZERO, VIEW).unwrap();
+        let cached = cache.lock().unwrap().get(&key).is_some();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        if cached {
+            sender.send(Instant::now()).unwrap();
+        } else {
+            let (clip, live, cache, key) = (clip.clone(), live.clone(), cache.clone(), key);
+            drop(stills.run(move || {
+                if live.load(Ordering::Relaxed) != generation {
+                    return;
+                }
+                let frame = ffmpeg::extract_frame(&clip, Duration::ZERO, VIEW).unwrap();
+                cache.lock().unwrap().insert(key, frame);
+                let _ = sender.send(Instant::now());
+            }));
+        }
+        // The next clip is opened after the interval; the frame counts if it
+        // arrived by then, or, for the last clip, whenever it does.
+        let shown = match receiver.recv_timeout(interval) {
+            Ok(shown) => Some(shown),
+            Err(_) if index + 1 == clips.len() => Some(receiver.recv().unwrap()),
+            Err(_) => None,
+        };
+        // Once its frame is up, the neighbours' are prefetched.
+        if shown.is_some() {
+            for neighbour in [index + 1, index.wrapping_sub(1)] {
+                let Some(next) = clips.get(neighbour).cloned() else {
+                    continue;
+                };
+                let (epoch, cache) = (epoch.clone(), cache.clone());
+                let queued_at = epoch.load(Ordering::Relaxed);
+                drop(prefetch.run(move || {
+                    if epoch.load(Ordering::Relaxed) != queued_at {
+                        return;
+                    }
+                    let key = FrameKey::new(&next, Duration::ZERO, VIEW).unwrap();
+                    if cache.lock().unwrap().contains(&key) {
+                        return;
+                    }
+                    let frame = ffmpeg::extract_frame(&next, Duration::ZERO, VIEW).unwrap();
+                    cache.lock().unwrap().insert(key, frame);
+                }));
+            }
+        }
+        latencies.push(shown.map_or(f64::NAN, |shown| ms(shown - opened)));
+        thread::sleep(interval.saturating_sub(opened.elapsed()));
+        // The extras only start if the clip stays open for a moment.
+        if interval > Duration::from_millis(250) {
+            background_extras(clip, duration, &filmstrip, Some((live.clone(), generation)));
+        }
+    }
+    latencies
+}
+
+#[test]
+#[ignore]
+fn bench_browse() {
+    let source = h264_1080p60().unwrap();
+    let duration = Duration::from_secs(60);
+    let dir = bench_dir().join("fixtures").join("browse");
+    fs::create_dir_all(&dir).unwrap();
+    let clips: Vec<PathBuf> = (0..8)
+        .map(|index| {
+            let path = dir.join(format!("clip{index}.mp4"));
+            if !path.exists() {
+                fs::hard_link(&source, &path)
+                    .or_else(|_| fs::copy(&source, &path).map(|_| ()))
+                    .unwrap();
+            }
+            path
+        })
+        .collect();
+    let mut report = Report::new("browse");
+    type Browse = fn(&[PathBuf], Duration, Duration) -> Vec<f64>;
+    for (label, interval) in [("hold arrow key", 60), ("flip through", 600)] {
+        let interval = Duration::from_millis(interval);
+        for (mode, run) in [("before", browse_eager as Browse), ("after", browse_latest)] {
+            let mut last = Vec::new();
+            let mut each = Vec::new();
+            for _ in 0..3 {
+                let latencies = run(&clips, interval, duration);
+                last.push(*latencies.last().unwrap());
+                each.extend(latencies.into_iter().filter(|l| !l.is_nan()));
+                // Let the leftovers of this run finish before the next.
+                thread::sleep(Duration::from_secs(5));
+            }
+            report.add(
+                format!("browse {label}: last clip first frame ({mode})"),
+                "ms",
+                last,
+            );
+            report.add(
+                format!("browse {label}: every clip first frame ({mode})"),
+                "ms",
+                each,
+            );
+        }
+    }
+    report.finish();
+}
+
+#[test]
+#[ignore]
+fn bench_inspect() {
+    let path = h264_1080p60().unwrap();
+    let mut report = Report::new("inspect");
+    let probe = (0..9).map(|_| time(|| info_of(&path)).0).collect();
+    report.add("inspect probe", "ms", probe);
+    let size = info_of(&path)
+        .video_size
+        .unwrap()
+        .fit_within(FrameSize::new(160, 90));
+    let thumbnail = (0..9)
+        .map(|_| time(|| ffmpeg::extract_keyframe(&path, Duration::from_secs(1), size).unwrap()).0)
+        .collect();
+    report.add("inspect thumbnail", "ms", thumbnail);
     report.finish();
 }

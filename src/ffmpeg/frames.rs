@@ -48,6 +48,7 @@ impl FrameSize {
 }
 
 /// One decoded frame in BGRA order.
+#[derive(Clone)]
 pub struct RawFrame {
     pub size: FrameSize,
     /// Presentation time relative to the start of the clip.
