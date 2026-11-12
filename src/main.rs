@@ -5,6 +5,7 @@
 mod audio;
 mod clip_order;
 mod clipboard;
+mod drafts;
 mod ffmpeg;
 mod library;
 mod markers;
@@ -25,6 +26,7 @@ use std::path::{Path, PathBuf};
 fn main() {
     settings::load();
     state::load();
+    drafts::load();
     let argument = std::env::args_os().nth(1).map(PathBuf::from);
     let (folder, clip) = launch_target(argument.as_deref());
     let folder = folder

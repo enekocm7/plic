@@ -11,6 +11,7 @@ use std::{
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _, h_flex, v_flex,
 };
@@ -19,14 +20,14 @@ use gpui_kit::*;
 
 use super::{
     frame_image,
-    timeline::{self, Drag, TimelineState},
+    timeline::{self, Drag, TimelineState, View},
     volume,
 };
 use crate::{
     audio::AudioOutput,
     ffmpeg::{self, CropRect, FrameSize, MediaInfo},
     markers::Markers,
-    playback::{MAX_FRAME_RATE, Playback},
+    playback::{MAX_FRAME_RATE, Playback, SPEEDS},
     timestamp,
     trim::{self, Segments, TrimRange},
     worker::WorkerPool,
@@ -50,6 +51,27 @@ const FILMSTRIPS_KEPT: usize = 8;
 const HOVER_STEPS: usize = 200;
 const HOVER_FRAME_SIZE: FrameSize = FrameSize::new(240, 135);
 const HOVER_PREVIEW_WIDTH: f32 = 160.;
+/// Zoomed all the way in, the timeline still shows this many frames.
+const MIN_VISIBLE_FRAMES: u32 = 20;
+/// How much the zoom keys zoom.
+const KEY_ZOOM: f64 = 2.0;
+/// How often the playhead moves while rewinding.
+const REWIND_TICK: Duration = Duration::from_millis(80);
+
+/// The next speed up from `current` in [`SPEEDS`], at least normal speed
+/// and never past the fastest.
+fn faster(current: f64) -> f64 {
+    SPEEDS
+        .iter()
+        .copied()
+        .find(|&speed| speed >= 1.0 && speed > current + f64::EPSILON)
+        .unwrap_or(SPEEDS[SPEEDS.len() - 1])
+}
+
+/// `1.5×`: a speed as shown on the speed button.
+fn speed_label(speed: f64) -> SharedString {
+    format!("{speed}×").into()
+}
 
 /// Emitted when the user changes the segments from the viewer.
 pub enum PlayerEvent {
@@ -170,6 +192,14 @@ pub struct Player {
     last_activity: Instant,
     /// Whether the volume slider is being dragged.
     pub(super) dragging_volume: bool,
+    /// The part of the clip the timeline shows.
+    view: View,
+    /// Speed of forward playback.
+    speed: f64,
+    /// Speed of the shuttle playing backwards, while it runs.
+    rewind: Option<f64>,
+    /// Bumped whenever rewinding starts or stops, ending older rewind loops.
+    rewind_generation: u64,
 }
 
 impl Player {
@@ -208,6 +238,10 @@ impl Player {
             fullscreen: false,
             last_activity: Instant::now(),
             dragging_volume: false,
+            view: View::WHOLE,
+            speed: 1.0,
+            rewind: None,
+            rewind_generation: 0,
         }
     }
 
@@ -267,6 +301,7 @@ impl Player {
         let hover_frames = std::mem::take(&mut self.hover_frames);
         self.stale_frames.extend(hover_frames.frames.into_values());
         self.generation += 1;
+        self.stop_rewind();
         self.source = None;
         self.playback = None;
         self.position = Duration::ZERO;
@@ -277,6 +312,7 @@ impl Player {
         self.resume_after_drag = false;
         self.segments = Segments::default();
         self.markers = Markers::default();
+        self.view = View::WHOLE;
         self.waveform = None;
         self.stale_frames.extend(self.frame.take());
     }
@@ -304,7 +340,9 @@ impl Player {
     }
 
     pub fn toggle_play(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.is_playing() {
+        if self.stop_rewind() {
+            cx.notify();
+        } else if self.is_playing() {
             self.pause(cx);
         } else {
             self.play(window, cx);
@@ -312,6 +350,7 @@ impl Player {
     }
 
     pub fn play(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.stop_rewind();
         let Some(source) = &self.source else {
             return;
         };
@@ -354,7 +393,14 @@ impl Player {
         } else {
             None
         };
-        let result = Playback::start(&source.path, from, size, source.frame_rate(), audio);
+        let result = Playback::start(
+            &source.path,
+            from,
+            size,
+            source.frame_rate(),
+            self.speed,
+            audio,
+        );
         self.apply_volume();
         match result {
             Ok(playback) => {
@@ -372,6 +418,7 @@ impl Player {
 
     /// Moves the playhead, keeping playback running if it was.
     pub fn seek(&mut self, to: Duration, window: &mut Window, cx: &mut Context<Self>) {
+        self.stop_rewind();
         let Some(source) = &self.source else {
             return;
         };
@@ -384,6 +431,7 @@ impl Player {
         let was_playing = self.is_playing();
         self.playback = None;
         self.position = to;
+        self.follow_playhead();
         if was_playing && self.drag.is_none() {
             self.start_playback(to, cx);
             self.schedule_tick(window, cx);
@@ -391,6 +439,104 @@ impl Player {
             self.request_still(to, cx);
         }
         cx.notify();
+    }
+
+    /// Changes the speed of forward playback, carrying on from the same
+    /// point if it is playing.
+    pub fn set_speed(&mut self, speed: f64, window: &mut Window, cx: &mut Context<Self>) {
+        if (self.speed - speed).abs() < f64::EPSILON {
+            return;
+        }
+        self.speed = speed;
+        if self.is_playing() {
+            let position = self.position();
+            self.start_playback(position, cx);
+            self.schedule_tick(window, cx);
+        } else if let Some(playback) = self.playback.take() {
+            // A paused session would resume at the old speed.
+            self.position = playback.position();
+        }
+        cx.notify();
+    }
+
+    /// L: plays forward, and each press while playing goes faster.
+    pub fn shuttle_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.source.is_none() {
+            return;
+        }
+        if self.is_playing() {
+            self.set_speed(faster(self.speed), window, cx);
+        } else {
+            self.stop_rewind();
+            self.set_speed(1.0, window, cx);
+            self.play(window, cx);
+        }
+    }
+
+    /// J: plays backward, and each press while rewinding goes faster.
+    pub fn shuttle_backward(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        if self.source.is_none() {
+            return;
+        }
+        let speed = self.rewind.map_or(1.0, faster);
+        if self.is_playing() {
+            self.pause(cx);
+        }
+        self.playback = None;
+        if self.rewind.is_none() {
+            self.rewind_generation += 1;
+            let generation = self.rewind_generation;
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(REWIND_TICK).await;
+                    let more = this.update(cx, |this, cx| {
+                        this.rewind_generation == generation && this.rewind_step(cx)
+                    });
+                    if !matches!(more, Ok(true)) {
+                        return;
+                    }
+                }
+            })
+            .detach();
+        }
+        self.rewind = Some(speed);
+        cx.notify();
+    }
+
+    /// Moves the playhead back one rewind tick. False once rewinding ends.
+    fn rewind_step(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(speed) = self.rewind else {
+            return false;
+        };
+        // While looping, rewinding stops at the start of the selection.
+        let floor = if self.looping && self.position > self.trim().start {
+            self.trim().start
+        } else {
+            Duration::ZERO
+        };
+        let position = self
+            .position
+            .saturating_sub(REWIND_TICK.mul_f64(speed))
+            .max(floor);
+        self.position = position;
+        self.follow_playhead();
+        self.request_still(position, cx);
+        cx.notify();
+        if position <= floor {
+            self.stop_rewind();
+            return false;
+        }
+        true
+    }
+
+    /// Stops rewinding. Returns whether it was.
+    fn stop_rewind(&mut self) -> bool {
+        if self.rewind.take().is_some() {
+            self.rewind_generation += 1;
+            true
+        } else {
+            false
+        }
     }
 
     pub fn seek_by(&mut self, delta: i64, window: &mut Window, cx: &mut Context<Self>) {
@@ -405,6 +551,7 @@ impl Player {
 
     /// Steps a single frame; pauses first so the step is visible.
     pub fn step(&mut self, frames: i32, window: &mut Window, cx: &mut Context<Self>) {
+        self.stop_rewind();
         if self.is_playing() {
             self.pause(cx);
         }
@@ -416,6 +563,56 @@ impl Player {
             position + interval * frames as u32
         };
         self.seek(target, window, cx);
+    }
+
+    /// Zooms the timeline by `factor` around `anchor`; above 1 zooms in.
+    pub(super) fn zoom_timeline(&mut self, factor: f64, anchor: Duration, cx: &mut Context<Self>) {
+        let Some(duration) = self.duration().filter(|duration| !duration.is_zero()) else {
+            return;
+        };
+        let min_span = self.frame_interval() * MIN_VISIBLE_FRAMES;
+        let view = self.view.zoom(factor, anchor, duration, min_span);
+        if view != self.view {
+            self.view = view;
+            cx.notify();
+        }
+    }
+
+    /// Scrolls the zoomed timeline by `seconds`, negative going back.
+    pub(super) fn pan_timeline(&mut self, seconds: f64, cx: &mut Context<Self>) {
+        let Some(duration) = self.duration() else {
+            return;
+        };
+        let view = self.view.pan(seconds, duration);
+        if view != self.view {
+            self.view = view;
+            cx.notify();
+        }
+    }
+
+    /// Zooms in around the playhead, keeping it in view.
+    pub fn zoom_in(&mut self, cx: &mut Context<Self>) {
+        self.follow_playhead();
+        self.zoom_timeline(KEY_ZOOM, self.position(), cx);
+    }
+
+    pub fn zoom_out(&mut self, cx: &mut Context<Self>) {
+        self.zoom_timeline(1.0 / KEY_ZOOM, self.position(), cx);
+    }
+
+    /// Shows the whole clip again.
+    pub fn zoom_to_fit(&mut self, cx: &mut Context<Self>) {
+        if self.view.is_zoomed() {
+            self.view = View::WHOLE;
+            cx.notify();
+        }
+    }
+
+    /// Scrolls the zoomed timeline so the playhead is in view.
+    fn follow_playhead(&mut self) {
+        if let Some(duration) = self.duration() {
+            self.view = self.view.follow(self.position(), duration);
+        }
     }
 
     pub fn set_fullscreen(&mut self, fullscreen: bool, cx: &mut Context<Self>) {
@@ -490,6 +687,19 @@ impl Player {
     /// The segment being edited.
     fn trim(&self) -> TrimRange {
         self.segments.active()
+    }
+
+    /// Whether a timeline drag is under way.
+    pub fn is_dragging(&self) -> bool {
+        self.drag.is_some()
+    }
+
+    /// Replaces every segment, e.g. when a trim is undone.
+    pub fn set_segments(&mut self, segments: Segments, cx: &mut Context<Self>) {
+        if self.segments != segments {
+            self.segments = segments;
+            cx.notify();
+        }
     }
 
     /// Replaces the active segment's range, e.g. after it was typed into
@@ -645,6 +855,7 @@ impl Player {
     }
 
     pub(super) fn begin_drag(&mut self, drag: Drag, cx: &mut Context<Self>) {
+        self.stop_rewind();
         self.resume_after_drag = self.is_playing();
         if let Some(playback) = self.playback.take() {
             self.position = playback.position();
@@ -710,6 +921,8 @@ impl Player {
                 .as_ref()
                 .and_then(|source| source.info.video_size)
                 .map_or(16. / 9., FrameSize::aspect_ratio),
+            view: self.view,
+            frame_interval: self.frame_interval(),
         }
     }
 
@@ -1042,6 +1255,9 @@ impl Player {
             self.show_frame(frame);
             changed = true;
         }
+        if self.drag.is_none() {
+            self.follow_playhead();
+        }
 
         let finished = self.playback.as_ref().is_some_and(Playback::is_finished);
         if self.looping {
@@ -1231,6 +1447,39 @@ impl Player {
                     ),
             )
             .child(div().flex_1())
+            .when_some(self.rewind, |row, speed| {
+                row.child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(format!("Rewinding {}", speed_label(speed))),
+                )
+            })
+            .child({
+                let this = cx.entity().downgrade();
+                let current = self.speed;
+                Button::new("speed")
+                    .ghost()
+                    .small()
+                    .label(speed_label(current))
+                    .tooltip("Playback speed (J and L shuttle)")
+                    .disabled(!enabled)
+                    .dropdown_menu(move |menu, _, _| {
+                        SPEEDS.iter().fold(menu, |menu, &speed| {
+                            let this = this.clone();
+                            menu.item(
+                                PopupMenuItem::new(speed_label(speed))
+                                    .checked((speed - current).abs() < f64::EPSILON)
+                                    .on_click(move |_, window, cx| {
+                                        this.update(cx, |player, cx| {
+                                            player.set_speed(speed, window, cx)
+                                        })
+                                        .ok();
+                                    }),
+                            )
+                        })
+                    })
+            })
             .child(
                 Button::new("loop")
                     .ghost()
@@ -1364,5 +1613,18 @@ fn letterbox(bounds: Bounds<Pixels>, aspect: f32) -> Bounds<Pixels> {
             bounds.origin.y + px((height - fitted_height) / 2.0),
         ),
         size: size(px(fitted_width), px(fitted_height)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::faster;
+
+    #[test]
+    fn shuttle_steps_up_to_the_fastest_speed() {
+        assert_eq!(faster(0.5), 1.0);
+        assert_eq!(faster(1.0), 1.5);
+        assert_eq!(faster(1.5), 2.0);
+        assert_eq!(faster(2.0), 2.0);
     }
 }

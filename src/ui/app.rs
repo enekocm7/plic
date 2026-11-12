@@ -11,7 +11,8 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _, DropdownButton};
 use gpui_kit::component::menu::PopupMenuItem;
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, Sizable as _, Theme, ThemeMode, TitleBar, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, Sizable as _, Theme, ThemeMode, TitleBar, h_flex,
+    v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -19,12 +20,17 @@ use gpui_kit::*;
 use super::{
     AddSegment, CONTEXT, CopyLastExport, DeleteClip, ExitFullscreen, ExportClip, JumpToEnd,
     JumpToIn, JumpToOut, JumpToStart, MarkIn, MarkOut, NextMarker, OpenFolder, PreviousMarker,
-    Reload, ResetTrim, SaveFrame, SaveFrameJpeg, SeekBackward, SeekForward, SelectNextClip,
-    SelectPreviousClip, ShowSettings, ShowShortcuts, SplitAtPlayhead, StepBackward, StepForward,
-    ToggleFullscreen, ToggleLoop, ToggleMarker, ToggleMute, TogglePlay, ToggleTheme, TrimToMarkers,
+    Redo, Reload, ResetTrim, SaveFrame, SaveFrameJpeg, SeekBackward, SeekForward, SelectAllClips,
+    SelectNextClip, SelectPreviousClip, ShowSettings, ShowShortcuts, ShuttleBackward,
+    ShuttleForward, SplitAtPlayhead, StepBackward, StepForward, ToggleFullscreen, ToggleLoop,
+    ToggleMarker, ToggleMute, TogglePlay, ToggleTheme, TrimToMarkers, Undo, ZoomIn, ZoomOut,
+    ZoomToFit,
+    batch::Marks,
     clip_filter::ClipFilter,
     editor::Editor,
+    ffmpeg_setup::Setup,
     frame_image,
+    history::History,
     jobs::{ExportJob, FinishedExport},
     player::{Player, PlayerEvent},
     shortcuts,
@@ -41,6 +47,9 @@ use crate::{
 /// How long the folder must stay quiet before it is rescanned, so
 /// recordings that are still being written are not listed early.
 const WATCH_SETTLE: Duration = Duration::from_secs(2);
+
+/// How long after a change to a clip's draft it is written to disk.
+const DRAFT_SAVE_DELAY: Duration = Duration::from_secs(1);
 
 /// Thumbnails are decoded at twice their on-screen size for HiDPI displays.
 const THUMBNAIL_SIZE: FrameSize = FrameSize::new(160, 90);
@@ -104,6 +113,33 @@ impl ClipEntry {
         }
     }
 
+    /// A clip to edit, with the trims, name and destination it was left
+    /// with last time.
+    fn restored(file: ClipFile) -> Self {
+        let mut entry = Self::new(file);
+        let Some(draft) = crate::drafts::get(&entry.file.path)
+            .filter(|draft| draft.matches_size(entry.file.size))
+        else {
+            return entry;
+        };
+        if let Some(segments) = draft.segments() {
+            entry.segments = segments;
+        }
+        if let Some(name) = draft.name {
+            entry.name = name;
+            // A name from last time is not overwritten by the template.
+            entry.templated = true;
+        }
+        entry.folder = draft.folder.filter(|folder| folder.is_dir());
+        entry
+    }
+
+    /// What is worth remembering about this clip until it is exported.
+    fn draft(&self) -> Option<crate::drafts::Draft> {
+        let name = (self.name != self.file.stem()).then(|| self.name.clone());
+        crate::drafts::Draft::new(self.file.size, &self.segments, name, self.folder.clone())
+    }
+
     /// The audio tracks to export, in stream order.
     pub fn export_tracks(&self) -> Vec<usize> {
         let count = self.info().map_or(0, |info| info.audio_tracks.len());
@@ -145,6 +181,8 @@ pub struct PlicApp {
     /// The selected clip still to be edited. At most one of this and
     /// `settled_selected` is set.
     pub(super) selected: Option<usize>,
+    /// Clips selected together with Ctrl and Shift, for batch actions.
+    pub(super) marks: Marks,
     pub(super) list_scroll: UniformListScrollHandle,
     /// Originals already exported, shown in the collapsible Settled list.
     pub(super) settled: Vec<ClipEntry>,
@@ -176,6 +214,12 @@ pub struct PlicApp {
     /// GitHub is asked on its own thread so a slow network never delays the
     /// UI.
     pub(super) updates_worker: WorkerPool,
+    /// Downloading plic's own copy of ffmpeg.
+    pub(super) ffmpeg: Setup,
+    /// Changes that can be undone and redone.
+    pub(super) history: History,
+    /// Whether changed drafts are about to be written.
+    saving_drafts: bool,
 }
 
 impl PlicApp {
@@ -208,6 +252,7 @@ impl PlicApp {
             folders: Vec::new(),
             last_folder: None,
             selected: None,
+            marks: Marks::default(),
             list_scroll: UniformListScrollHandle::new(),
             settled: Vec::new(),
             settled_selected: None,
@@ -226,7 +271,11 @@ impl PlicApp {
             update: None,
             checking_update: false,
             updates_worker: WorkerPool::new("update", 1),
+            ffmpeg: Setup::Idle,
+            history: History::default(),
+            saving_drafts: false,
         };
+        app.set_up_ffmpeg(window, cx);
         if let Some(folder) = folder {
             app.load_folder(folder, window, cx);
         }
@@ -241,7 +290,12 @@ impl PlicApp {
         app
     }
 
-    fn load_folder(&mut self, folder: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn load_folder(
+        &mut self,
+        folder: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.generation += 1;
         let old_entries = std::mem::take(&mut self.clips)
             .into_iter()
@@ -250,7 +304,7 @@ impl PlicApp {
             .extend(old_entries.filter_map(|entry| entry.thumbnail));
         match Library::scan(&folder) {
             Ok(library) => {
-                self.clips = library.clips.into_iter().map(ClipEntry::new).collect();
+                self.clips = library.clips.into_iter().map(ClipEntry::restored).collect();
                 self.settled = library.settled.into_iter().map(ClipEntry::new).collect();
                 self.folders = library.folders;
                 self.load_error = None;
@@ -276,6 +330,7 @@ impl PlicApp {
         self.sync_folder_choices(window, cx);
         self.selected = None;
         self.settled_selected = None;
+        self.marks.clear();
         self.select(0, window, cx);
         if self.clips.is_empty() {
             self.show_selected_in_player(cx);
@@ -330,7 +385,7 @@ impl PlicApp {
 
     /// Merges a fresh scan into the lists: new recordings are added and
     /// vanished ones dropped, while every other clip keeps its draft.
-    fn refresh_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn refresh_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(folder) = self.folder.clone() else {
             return;
         };
@@ -368,7 +423,7 @@ impl PlicApp {
             let position = self
                 .clips
                 .partition_point(|clip| clip.file.file_name().to_lowercase() < key);
-            self.clips.insert(position, ClipEntry::new(file));
+            self.clips.insert(position, ClipEntry::restored(file));
             if let Some(selected) = &mut self.selected
                 && *selected >= position
             {
@@ -645,11 +700,23 @@ impl PlicApp {
     }
 
     fn export_clip(&mut self, _: &ExportClip, window: &mut Window, cx: &mut Context<Self>) {
-        self.export_current(window, cx);
+        if self.has_batch() && !self.is_viewing_settled() {
+            self.export_selection(window, cx);
+        } else {
+            self.export_current(window, cx);
+        }
     }
 
     fn delete_clip(&mut self, _: &DeleteClip, window: &mut Window, cx: &mut Context<Self>) {
-        self.confirm_delete(window, cx);
+        if self.has_batch() && !self.is_viewing_settled() {
+            self.confirm_delete_selection(window, cx);
+        } else {
+            self.confirm_delete(window, cx);
+        }
+    }
+
+    fn select_all_clips(&mut self, _: &SelectAllClips, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_all(cx);
     }
 
     fn mark_in(&mut self, _: &MarkIn, _: &mut Window, cx: &mut Context<Self>) {
@@ -726,6 +793,21 @@ impl PlicApp {
             .update(cx, |player, cx| player.seek_by(seek_step_ms(), window, cx));
     }
 
+    fn shuttle_backward(
+        &mut self,
+        _: &ShuttleBackward,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.player
+            .update(cx, |player, cx| player.shuttle_backward(window, cx));
+    }
+
+    fn shuttle_forward(&mut self, _: &ShuttleForward, window: &mut Window, cx: &mut Context<Self>) {
+        self.player
+            .update(cx, |player, cx| player.shuttle_forward(window, cx));
+    }
+
     fn step_backward(&mut self, _: &StepBackward, window: &mut Window, cx: &mut Context<Self>) {
         self.player
             .update(cx, |player, cx| player.step(-1, window, cx));
@@ -760,6 +842,18 @@ impl PlicApp {
             .update(cx, |player, cx| player.trim_between_markers(cx));
     }
 
+    fn zoom_in(&mut self, _: &ZoomIn, _: &mut Window, cx: &mut Context<Self>) {
+        self.player.update(cx, |player, cx| player.zoom_in(cx));
+    }
+
+    fn zoom_out(&mut self, _: &ZoomOut, _: &mut Window, cx: &mut Context<Self>) {
+        self.player.update(cx, |player, cx| player.zoom_out(cx));
+    }
+
+    fn zoom_to_fit(&mut self, _: &ZoomToFit, _: &mut Window, cx: &mut Context<Self>) {
+        self.player.update(cx, |player, cx| player.zoom_to_fit(cx));
+    }
+
     fn toggle_fullscreen(
         &mut self,
         _: &ToggleFullscreen,
@@ -772,7 +866,7 @@ impl PlicApp {
     fn exit_fullscreen(&mut self, _: &ExitFullscreen, window: &mut Window, cx: &mut Context<Self>) {
         if self.fullscreen {
             self.set_fullscreen(false, window, cx);
-        } else {
+        } else if !self.clear_marks(cx) {
             cx.propagate();
         }
     }
@@ -821,6 +915,7 @@ impl PlicApp {
     /// whichever list the selection is in.
     fn select_neighbour(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
         use super::library_panel::List;
+        self.marks.clear();
         let (list, selected) = match (self.settled_selected, self.selected) {
             (Some(selected), _) => (List::Settled, Some(selected)),
             (None, selected) => (List::Clips, selected),
@@ -862,6 +957,11 @@ impl PlicApp {
     }
 
     fn reload(&mut self, _: &Reload, window: &mut Window, cx: &mut Context<Self>) {
+        self.reload_folder(window, cx);
+    }
+
+    /// Scans the folder again, keeping the clip in view selected.
+    pub(super) fn reload_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(folder) = self.folder.clone() {
             let viewed = self.viewed().map(|entry| entry.file.path.clone());
             self.load_folder(folder, window, cx);
@@ -911,10 +1011,28 @@ impl PlicApp {
         if let Some(index) = self.index_of(first) {
             self.select(index, window, cx);
         } else if let Some(index) = self.settled_index_of(first) {
-            self.settled_open = true;
-            self.load_settled_details(cx);
-            self.select_settled(index, window, cx);
+            self.reveal_settled(index, window, cx);
         }
+    }
+
+    /// Opens the Settled list and selects one of its originals.
+    pub(super) fn reveal_settled(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.settled_open = true;
+        self.load_settled_details(cx);
+        self.select_settled(index, window, cx);
+    }
+
+    fn undo_action(&mut self, _: &Undo, window: &mut Window, cx: &mut Context<Self>) {
+        self.undo(window, cx);
+    }
+
+    fn redo_action(&mut self, _: &Redo, window: &mut Window, cx: &mut Context<Self>) {
+        self.redo(window, cx);
     }
 
     fn toggle_theme(&mut self, _: &ToggleTheme, window: &mut Window, cx: &mut Context<Self>) {
@@ -925,6 +1043,26 @@ impl PlicApp {
         };
         crate::state::update(|state| state.dark_theme = mode == ThemeMode::Dark);
         Theme::change(mode, Some(window), cx);
+    }
+
+    /// Keeps the selected clip's draft for the next run. Only clips still
+    /// to be edited have one; exported clips' drafts are dropped.
+    fn remember_draft(&mut self, cx: &mut Context<Self>) {
+        if let Some(entry) = self
+            .current()
+            .filter(|entry| entry.status == ClipStatus::Pending)
+        {
+            crate::drafts::put(&entry.file.path, entry.draft());
+        }
+        if crate::drafts::is_dirty() && !self.saving_drafts {
+            self.saving_drafts = true;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(DRAFT_SAVE_DELAY).await;
+                cx.background_spawn(async { crate::drafts::save() }).await;
+                this.update(cx, |this, _| this.saving_drafts = false).ok();
+            })
+            .detach();
+        }
     }
 
     pub(super) fn current(&self) -> Option<&ClipEntry> {
@@ -1048,6 +1186,34 @@ impl PlicApp {
                                     })
                                 })
                         })
+                        .child({
+                            let tooltip: SharedString = match self.history.next_undo() {
+                                Some(change) => format!("Undo {} (Ctrl+Z)", change.describe()),
+                                None => "Nothing to undo".into(),
+                            }
+                            .into();
+                            Button::new("undo")
+                                .ghost()
+                                .small()
+                                .icon(IconName::Undo2)
+                                .tooltip(tooltip)
+                                .disabled(self.history.next_undo().is_none())
+                                .on_click(cx.listener(|this, _, window, cx| this.undo(window, cx)))
+                        })
+                        .child({
+                            let tooltip: SharedString = match self.history.next_redo() {
+                                Some(change) => format!("Redo {} (Ctrl+Y)", change.describe()),
+                                None => "Nothing to redo".into(),
+                            }
+                            .into();
+                            Button::new("redo")
+                                .ghost()
+                                .small()
+                                .icon(IconName::Redo2)
+                                .tooltip(tooltip)
+                                .disabled(self.history.next_redo().is_none())
+                                .on_click(cx.listener(|this, _, window, cx| this.redo(window, cx)))
+                        })
                         .child(
                             Button::new("reload")
                                 .ghost()
@@ -1113,6 +1279,10 @@ impl Render for PlicApp {
         for image in self.stale_images.drain(..) {
             window.drop_image(image).ok();
         }
+        // Every trim edit ends in a render, so this sees them all.
+        self.watch_trim(cx);
+        // Every edit to a draft ends in a render, so this catches them all.
+        self.remember_draft(cx);
         let theme = cx.theme();
         v_flex()
             .id("plic")
@@ -1129,6 +1299,8 @@ impl Render for PlicApp {
             .on_action(cx.listener(Self::toggle_play))
             .on_action(cx.listener(Self::seek_backward))
             .on_action(cx.listener(Self::seek_forward))
+            .on_action(cx.listener(Self::shuttle_backward))
+            .on_action(cx.listener(Self::shuttle_forward))
             .on_action(cx.listener(Self::step_backward))
             .on_action(cx.listener(Self::step_forward))
             .on_action(cx.listener(Self::jump_to_start))
@@ -1139,6 +1311,9 @@ impl Render for PlicApp {
             .on_action(cx.listener(Self::previous_marker))
             .on_action(cx.listener(Self::trim_to_markers))
             .on_action(cx.listener(Self::toggle_fullscreen))
+            .on_action(cx.listener(Self::zoom_in))
+            .on_action(cx.listener(Self::zoom_out))
+            .on_action(cx.listener(Self::zoom_to_fit))
             .on_action(cx.listener(Self::exit_fullscreen))
             .on_action(cx.listener(Self::mark_in))
             .on_action(cx.listener(Self::mark_out))
@@ -1153,13 +1328,17 @@ impl Render for PlicApp {
             .on_action(cx.listener(Self::jump_to_out))
             .on_action(cx.listener(Self::export_clip))
             .on_action(cx.listener(Self::delete_clip))
+            .on_action(cx.listener(Self::select_all_clips))
             .on_action(cx.listener(Self::show_shortcuts))
             .on_action(cx.listener(Self::show_settings))
+            .on_action(cx.listener(Self::undo_action))
+            .on_action(cx.listener(Self::redo_action))
             .on_drop(cx.listener(|this, dropped: &ExternalPaths, window, cx| {
                 this.handle_drop(dropped, window, cx)
             }))
             .when(!self.fullscreen, |this| {
                 this.child(self.render_title_bar(cx))
+                    .children(self.render_ffmpeg_banner(cx))
                     .when(self.update.is_some(), |this| {
                         this.child(self.render_update_banner(cx))
                     })

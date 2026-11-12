@@ -9,6 +9,7 @@ mod export;
 mod frames;
 mod graph;
 mod probe;
+pub mod tools;
 mod transform;
 mod waveform;
 
@@ -25,8 +26,15 @@ pub use frames::{
 };
 pub use graph::{AudioAdjust, TARGET_LOUDNESS};
 pub use probe::{MediaInfo, keyframe_at_or_before, probe};
+pub use tools::Tool;
 pub use transform::{CropAspect, CropRect, OutputLimits, Transform};
 pub use waveform::{peaks as audio_peaks, resample as resample_peaks};
+
+/// A command that runs `tool`: plic's own copy, the one in the folder set
+/// in the settings, or the one on `PATH`.
+pub fn command(tool: Tool) -> Command {
+    Command::new(tools::program(tool))
+}
 
 pub trait CommandExt {
     /// Keeps the child from opening a console window. Release builds are GUI

@@ -5,11 +5,7 @@
 //! build. The first one that can encode a test clip on this machine is used
 //! for every export in that codec.
 
-use std::{
-    process::{Command, Stdio},
-    sync::OnceLock,
-    thread,
-};
+use std::{process::Stdio, sync::OnceLock, thread};
 
 use super::CommandExt as _;
 
@@ -231,7 +227,7 @@ impl Encoder {
 
     /// Whether this encoder can encode a short test clip on this machine.
     fn works(&self, codec: Codec) -> bool {
-        Command::new("ffmpeg")
+        crate::ffmpeg::command(crate::ffmpeg::Tool::Ffmpeg)
             .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i"])
             .arg("color=c=black:s=640x360:r=30:d=0.5,format=yuv420p")
             .args(self.args(codec, Rate::Quality(Quality::Balanced)))

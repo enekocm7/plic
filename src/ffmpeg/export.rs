@@ -432,7 +432,7 @@ impl Parts<'_> {
 }
 
 fn base_command() -> Command {
-    let mut command = Command::new("ffmpeg");
+    let mut command = crate::ffmpeg::command(crate::ffmpeg::Tool::Ffmpeg);
     command.args(["-hide_banner", "-loglevel", "error", "-nostats", "-y"]);
     command
 }
@@ -463,9 +463,9 @@ fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let mut child = command
-        .spawn()
-        .context("could not start ffmpeg; check that it is installed and on PATH")?;
+    let mut child = command.spawn().context(
+        "could not start ffmpeg; wait for its download to finish or set its folder in the settings",
+    )?;
     let stderr = drain_in_background(child.stderr.take());
 
     if let Some(stdout) = child.stdout.take() {
@@ -758,7 +758,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("plic-target-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let source = dir.join("source.mp4");
-        let made = Command::new("ffmpeg")
+        let made = crate::ffmpeg::command(crate::ffmpeg::Tool::Ffmpeg)
             .args([
                 "-hide_banner",
                 "-loglevel",
@@ -825,7 +825,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("plic-anim-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let source = dir.join("source.mp4");
-        let made = Command::new("ffmpeg")
+        let made = crate::ffmpeg::command(crate::ffmpeg::Tool::Ffmpeg)
             .args([
                 "-hide_banner",
                 "-loglevel",
