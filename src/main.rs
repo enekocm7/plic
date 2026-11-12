@@ -5,6 +5,7 @@
 mod audio;
 mod clip_order;
 mod clipboard;
+mod drafts;
 mod ffmpeg;
 mod library;
 mod markers;
@@ -25,6 +26,7 @@ use std::path::PathBuf;
 fn main() {
     settings::load();
     state::load();
+    drafts::load();
     // `plic <folder>` opens that folder; otherwise the working directory, which
     // keeps the old "run it inside the clips folder" workflow working.
     let folder = std::env::args_os()
