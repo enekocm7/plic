@@ -68,9 +68,9 @@ jobs:
           Compress-Archive -Path "$portable\*" -DestinationPath "$portable.zip" -Force
           Remove-Item -Recurse $portable
 
-          # winget and Scoop manifests for this release, from packaging/.
+          # The Scoop manifest for this release, from packaging/.
           pwsh packaging/render-manifests.ps1 -Version $version `
-            -Installer "$dist\plic-$version-setup.exe" -Zip "$portable.zip" `
+            -Zip "$portable.zip" `
             -OutDir target\manifests
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Compress-Archive -Path target\manifests\* -DestinationPath "$dist\plic-$version-manifests.zip" -Force
@@ -96,31 +96,6 @@ jobs:
             --title "plic ${{ steps.version.outputs.version }}" `
             --generate-notes `
             --verify-tag
-
-  winget:
-    name: Submit to winget
-    needs: windows
-    runs-on: windows-latest
-    # Needs a classic GitHub token with public_repo scope in the WINGET_TOKEN
-    # secret; without one the job explains what to do and stops.
-    env:
-      WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: manifests
-          path: manifests
-
-      - name: Open a pull request on microsoft/winget-pkgs
-        shell: pwsh
-        run: |
-          if (-not $env:WINGET_TOKEN) {
-            Write-Output "::notice::WINGET_TOKEN is not set; the winget manifests are attached to the release for submitting by hand."
-            exit 0
-          }
-          Invoke-WebRequest https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
-          $manifest = Get-ChildItem manifests/winget/enekocm7.plic -Directory | Select-Object -First 1
-          .\wingetcreate.exe submit --token $env:WINGET_TOKEN $manifest.FullName
 
   scoop:
     name: Update the Scoop bucket

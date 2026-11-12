@@ -36,12 +36,7 @@ Finished originals step aside, so the list only shows what's left to do.
 ## Install
 
 **Windows:** download `plic-<version>-setup.exe` from the
-[latest release](https://github.com/enekocm7/plic/releases/latest), or use a
-package manager:
-
-```sh
-winget install enekocm7.plic
-```
+[latest release](https://github.com/enekocm7/plic/releases/latest), or use Scoop:
 
 ```sh
 scoop bucket add plic https://github.com/enekocm7/plic
@@ -169,11 +164,9 @@ on Windows for every push to `master` and every pull request.
 1. Bump `version` in `Cargo.toml` and run `cargo build` to update `Cargo.lock`.
 2. Commit, then `git tag v0.9.0 && git push origin master v0.9.0`.
 
-GitHub Actions publishes the installer, the portable `.zip`, package manifests
-(rendered from `packaging/` by `render-manifests.ps1`) and `SHA256SUMS.txt`. It
-then updates the Scoop bucket and, if a `WINGET_TOKEN` secret (classic token,
-`public_repo` scope) is set, opens a winget-pkgs pull request. Without the
-token, submit the attached manifests by hand.
+GitHub Actions publishes the installer, the portable `.zip`, the Scoop
+manifest (rendered from `packaging/` by `render-manifests.ps1`) and
+`SHA256SUMS.txt`, then commits the updated `bucket/plic.json` to `master`.
 
 To build the installer locally, install [Inno Setup](https://jrsoftware.org/isinfo.php) and run:
 
