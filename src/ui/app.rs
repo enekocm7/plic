@@ -21,7 +21,7 @@ use super::{
     Reload, ResetTrim, SaveFrame, SaveFrameJpeg, SeekBackward, SeekForward, SelectNextClip,
     SelectPreviousClip, ShowShortcuts, SplitAtPlayhead, StepBackward, StepForward,
     ToggleFullscreen, ToggleLoop, ToggleMarker, ToggleMute, TogglePlay, ToggleTheme, TrimToMarkers,
-    editor::Editor,
+    clip_filter::ClipFilter,\n    editor::Editor,
     frame_image,
     jobs::{ExportJob, FinishedExport},
     player::{Player, PlayerEvent},
@@ -123,6 +123,8 @@ pub struct PlicApp {
     fullscreen: bool,
     pub(super) player: Entity<Player>,
     pub(super) editor: Editor,
+    /// Search box, ordering and status filter of the clip list.
+    pub(super) filter: ClipFilter,
     /// The clips folder.
     pub(super) folder: Option<PathBuf>,
     pub(super) clips: Vec<ClipEntry>,
@@ -175,6 +177,7 @@ impl PlicApp {
             fullscreen: false,
             player,
             editor: Editor::new(window, cx),
+            filter: ClipFilter::new(window, cx),
             folder: None,
             clips: Vec::new(),
             folders: Vec::new(),
@@ -314,8 +317,14 @@ impl PlicApp {
         }
         self.selected = Some(index);
         self.settled_selected = None;
-        self.list_scroll
-            .scroll_to_item(index, ScrollStrategy::Nearest);
+        if let Some(row) = self
+            .visible(super::library_panel::List::Clips, cx)
+            .iter()
+            .position(|&visible| visible == index)
+        {
+            self.list_scroll
+                .scroll_to_item(row, ScrollStrategy::Nearest);
+        }
         self.show_selected_in_player(cx);
         self.sync_editor(window, cx);
         cx.notify();
@@ -334,8 +343,14 @@ impl PlicApp {
         }
         self.settled_selected = Some(index);
         self.selected = None;
-        self.settled_scroll
-            .scroll_to_item(index, ScrollStrategy::Nearest);
+        if let Some(row) = self
+            .visible(super::library_panel::List::Settled, cx)
+            .iter()
+            .position(|&visible| visible == index)
+        {
+            self.settled_scroll
+                .scroll_to_item(row, ScrollStrategy::Nearest);
+        }
         self.show_selected_in_player(cx);
         self.sync_editor(window, cx);
         cx.notify();
@@ -660,19 +675,35 @@ impl PlicApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(selected) = self.settled_selected {
-            self.select_settled(selected.saturating_sub(1), window, cx);
-        } else if let Some(selected) = self.selected {
-            self.select(selected.saturating_sub(1), window, cx);
-        }
+        self.select_neighbour(-1, window, cx);
     }
 
     fn select_next(&mut self, _: &SelectNextClip, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(selected) = self.settled_selected {
-            self.select_settled(selected + 1, window, cx);
-        } else {
-            let next = self.selected.map_or(0, |selected| selected + 1);
-            self.select(next, window, cx);
+        self.select_neighbour(1, window, cx);
+    }
+
+    /// Moves the selection one row up or down the list as it is shown, in
+    /// whichever list the selection is in.
+    fn select_neighbour(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
+        use super::library_panel::List;
+        let (list, selected) = match (self.settled_selected, self.selected) {
+            (Some(selected), _) => (List::Settled, Some(selected)),
+            (None, selected) => (List::Clips, selected),
+        };
+        let rows = self.visible(list, cx);
+        let current = selected.and_then(|selected| rows.iter().position(|&row| row == selected));
+        let target = match current {
+            Some(current) => current
+                .saturating_add_signed(step)
+                .min(rows.len().saturating_sub(1)),
+            None => 0,
+        };
+        let Some(&index) = rows.get(target) else {
+            return;
+        };
+        match list {
+            List::Clips => self.select(index, window, cx),
+            List::Settled => self.select_settled(index, window, cx),
         }
     }
 

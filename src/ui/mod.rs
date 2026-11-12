@@ -2,6 +2,7 @@
 
 mod app;
 mod clip_actions;
+mod clip_filter;
 mod editor;
 mod frame_image;
 mod jobs;
