@@ -3,10 +3,13 @@
 //! plic: watch, trim and file away video clips.
 
 mod audio;
+#[cfg(test)]
+mod bench;
 mod clip_order;
 mod clipboard;
 mod drafts;
 mod ffmpeg;
+mod frame_cache;
 mod library;
 mod markers;
 mod naming;

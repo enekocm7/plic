@@ -550,7 +550,7 @@ fn add_input(command: &mut Command, request: &ExportRequest, range: TrimRange) {
         command.arg("-t").arg(seconds_arg(length));
     }
     if request.mode == ExportMode::Reencode {
-        command.args(["-hwaccel", "auto"]);
+        command.args(super::hwaccel_args());
     }
     command.arg("-i").arg(&request.source);
 }

@@ -8,7 +8,7 @@ use serde::Deserialize;
 use super::{CommandExt as _, FrameSize};
 
 /// What the player and editor need to know about a clip.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct MediaInfo {
     pub duration: Option<Duration>,
     /// Display size, with rotation metadata already applied.
@@ -18,6 +18,11 @@ pub struct MediaInfo {
     /// Every audio stream, in `0:a:N` order.
     pub audio_tracks: Vec<AudioTrack>,
     pub video_codec: Option<String>,
+    /// Where the container's clock starts, in seconds. ffmpeg's seeks are
+    /// relative to it and `-copyts` timestamps are on it.
+    pub start_time: f64,
+    /// Where the video stream starts on that clock, in seconds.
+    pub video_start: f64,
 }
 
 /// One audio stream of a clip, as recorders such as OBS label them.
@@ -61,6 +66,89 @@ impl MediaInfo {
     pub fn frame_interval(&self) -> Duration {
         Duration::from_secs_f64(1.0 / self.frame_rate.unwrap_or(30.0))
     }
+
+    /// Whether previews should decode on the GPU. For H.264 and HEVC up to
+    /// 4K the CPU starts faster and keeps up easily. AV1 is another matter:
+    /// a 1440p60 recording decodes at barely 90 frames a second on an
+    /// eight-core CPU, too close to real time once the app is busy, against
+    /// about 280 on the GPU, which also seeks faster within its long
+    /// keyframe intervals.
+    pub fn prefers_hardware_decode(&self) -> bool {
+        const UHD_PIXELS: u64 = 3840 * 2160;
+        let huge = self
+            .video_size
+            .is_some_and(|size| u64::from(size.width) * u64::from(size.height) > UHD_PIXELS);
+        huge || self.video_codec.as_deref() == Some("av1")
+    }
+
+    /// How previews of this clip should be decoded.
+    pub fn decoder(&self) -> super::Decoder {
+        super::Decoder {
+            hardware: self.prefers_hardware_decode(),
+            av1: self.video_codec.as_deref() == Some("av1"),
+        }
+    }
+
+    pub fn timing(&self) -> Timing {
+        Timing {
+            origin: self.start_time,
+            video_start: self.video_start,
+            frame_rate: self.frame_rate.unwrap_or(30.0),
+        }
+    }
+}
+
+/// How a clip's own time, which starts at 0, maps onto the clock of its
+/// container. Recordings often start their streams at different moments
+/// (audio a few hundred milliseconds before the first video frame, say), so
+/// playing both from a clip time means placing each on that shared clock.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Timing {
+    /// The container clock's reading at clip time 0, in seconds.
+    pub origin: f64,
+    /// The first video frame's time on the container clock.
+    pub video_start: f64,
+    /// Frames per second of the source video.
+    pub frame_rate: f64,
+}
+
+impl Default for Timing {
+    fn default() -> Self {
+        Self {
+            origin: 0.0,
+            video_start: 0.0,
+            frame_rate: 30.0,
+        }
+    }
+}
+
+impl Timing {
+    /// The container clock's reading at clip time `at`, in seconds, rounded
+    /// the way [`seconds_arg`](super::seconds_arg) rounds a seek position.
+    pub fn container_time(self, at: Duration) -> f64 {
+        self.origin + seconds_arg_value(at)
+    }
+
+    /// The clip time of the first video frame shown when playback starts at
+    /// `from`: the first frame of the source's own frame grid at or after
+    /// `from`, which is the one an accurate seek lands on, or the clip's
+    /// first frame when `from` is before it.
+    pub fn first_frame(self, from: Duration) -> Duration {
+        let video_start = (self.video_start - self.origin).max(0.0);
+        let from = seconds_arg_value(from);
+        if from <= video_start {
+            return Duration::from_secs_f64(video_start);
+        }
+        // A little slack, so a position that is a frame time up to rounding
+        // is that frame.
+        let frames = ((from - video_start) * self.frame_rate - 0.01).ceil();
+        Duration::from_secs_f64(video_start + frames / self.frame_rate)
+    }
+}
+
+/// `at` as the seek position ffmpeg is given, in seconds.
+fn seconds_arg_value(at: Duration) -> f64 {
+    super::seconds_arg(at).parse().unwrap_or(at.as_secs_f64())
 }
 
 pub fn probe(path: &Path) -> Result<MediaInfo> {
@@ -176,6 +264,7 @@ struct ProbeOutput {
 #[derive(Deserialize)]
 struct Format {
     duration: Option<String>,
+    start_time: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -188,6 +277,7 @@ struct Stream {
     avg_frame_rate: Option<String>,
     r_frame_rate: Option<String>,
     duration: Option<String>,
+    start_time: Option<String>,
     #[serde(default)]
     side_data_list: Vec<SideData>,
     #[serde(default)]
@@ -258,7 +348,22 @@ fn parse(json: &[u8]) -> Result<MediaInfo> {
             .find_map(|rate| parse_rate(rate))
     });
 
+    let start_time = probe
+        .format
+        .as_ref()
+        .and_then(|format| format.start_time.as_deref())
+        .and_then(|text| text.parse::<f64>().ok())
+        .filter(|start| start.is_finite())
+        .unwrap_or(0.0);
+    let video_start = video
+        .and_then(|stream| stream.start_time.as_deref())
+        .and_then(|text| text.parse::<f64>().ok())
+        .filter(|start| start.is_finite())
+        .unwrap_or(start_time);
+
     Ok(MediaInfo {
+        start_time,
+        video_start,
         duration,
         video_size,
         frame_rate,
@@ -334,6 +439,61 @@ mod tests {
         let no_keyframe = br#"{"packets": [{"pts_time": "2.5", "flags": "___"}], "streams": []}"#;
         assert!(parse_keyframe(no_keyframe, at).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn reads_where_the_streams_start() -> Result<()> {
+        let json = br#"{
+            "streams": [
+                {"codec_type": "video", "width": 1280, "height": 720, "start_time": "0.250000"},
+                {"codec_type": "audio", "start_time": "0.000000"}
+            ],
+            "format": {"duration": "10.0", "start_time": "0.000000"}
+        }"#;
+        let info = parse(json)?;
+        assert_eq!(info.start_time, 0.0);
+        assert_eq!(info.video_start, 0.25);
+
+        // Without any, everything starts at the container's origin.
+        let bare = parse(br#"{"streams": [{"codec_type": "video"}], "format": {}}"#)?;
+        assert_eq!((bare.start_time, bare.video_start), (0.0, 0.0));
+        Ok(())
+    }
+
+    #[test]
+    fn finds_the_first_frame_a_start_lands_on() {
+        let ms = Duration::from_millis;
+        let timing = Timing {
+            origin: 0.0,
+            video_start: 0.0,
+            frame_rate: 30000.0 / 1001.0,
+        };
+        // On the frame grid already, up to rounding.
+        assert_eq!(timing.first_frame(Duration::ZERO), Duration::ZERO);
+        let frame = |n: f64| Duration::from_secs_f64(n * 1001.0 / 30000.0);
+        assert_eq!(timing.first_frame(ms(2503)), frame(76.0));
+        assert_eq!(timing.first_frame(ms(2502)), frame(75.0));
+        // A 60 fps clip lands on the millisecond rounding of its frames.
+        let sixty = Timing {
+            frame_rate: 60.0,
+            ..timing
+        };
+        assert_eq!(sixty.first_frame(ms(7300)), ms(7300));
+        assert_eq!(
+            sixty.first_frame(ms(7301)),
+            Duration::from_secs_f64(7.316666666666666)
+        );
+
+        // Video that starts late, on a container that starts later still:
+        // clip time is relative to the container.
+        let late = Timing {
+            origin: 1.0,
+            video_start: 1.25,
+            frame_rate: 60.0,
+        };
+        assert_eq!(late.first_frame(ms(100)), ms(250));
+        assert_eq!(late.first_frame(ms(1000)), ms(1000));
+        assert_eq!(late.container_time(ms(1500)), 2.5);
     }
 
     #[test]
