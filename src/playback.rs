@@ -9,7 +9,7 @@ use anyhow::Result;
 
 use crate::{
     audio::{AudioOutput, AudioSession},
-    ffmpeg::{FrameSize, RawFrame, Timing, VideoStream},
+    ffmpeg::{FrameSize, MediaInfo, RawFrame, VideoStream},
 };
 
 /// Playback never decodes faster than this; higher rates only cost CPU.
@@ -22,6 +22,12 @@ const MAX_SPEED: f64 = 4.0;
 
 /// How long playback waits for audio before starting without it.
 const AUDIO_START_TIMEOUT: Duration = Duration::from_millis(750);
+
+/// The rate frames are decoded at before any speed-up: the clip's own, up
+/// to the most that is worth showing.
+pub fn decode_rate(info: &MediaInfo) -> f64 {
+    info.frame_rate.unwrap_or(30.0).min(MAX_FRAME_RATE)
+}
 
 /// A monotonic clock that can be paused, used when there is no audio.
 #[derive(Debug, Clone, Copy)]
@@ -84,16 +90,23 @@ impl Playback {
         path: &Path,
         from: Duration,
         size: FrameSize,
-        frame_rate: f64,
+        info: &MediaInfo,
         speed: f64,
-        timing: Timing,
         audio: Option<&mut AudioOutput>,
     ) -> Result<Self> {
         let speed = speed.clamp(MIN_SPEED, MAX_SPEED);
+        let timing = info.timing();
         // Faster playback shows more media frames per second; decode fewer
         // so the display rate stays within bounds.
-        let frame_rate = frame_rate.clamp(1.0, MAX_FRAME_RATE / speed.max(1.0));
-        let video = VideoStream::spawn(path, from, size, frame_rate, timing)?;
+        let frame_rate = decode_rate(info).clamp(1.0, MAX_FRAME_RATE / speed.max(1.0));
+        let video = VideoStream::spawn(
+            path,
+            from,
+            size,
+            frame_rate,
+            timing,
+            info.prefers_hardware_decode(),
+        )?;
         // A clip whose audio cannot be decoded still plays, silently.
         let audio = audio.and_then(|output| output.start(path, from, speed, timing).ok());
         Ok(Self {

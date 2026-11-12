@@ -58,13 +58,22 @@ pub struct RawFrame {
 /// Decodes the exact frame shown at `at`, scaled to `size`.
 pub fn extract_frame(path: &Path, at: Duration, size: FrameSize) -> Result<RawFrame> {
     let mut command = base_command();
-    command.arg("-ss").arg(seconds_arg(at)).arg("-i").arg(path);
+    if at.is_zero() {
+        // Only the first picture is needed, so spreading it over every core
+        // costs more in start-up than it saves; this is the frame shown
+        // whenever a clip is opened.
+        command.args(["-threads", "1"]);
+    } else {
+        command.arg("-ss").arg(seconds_arg(at));
+    }
+    command.arg("-i").arg(path);
     run_single_frame(command, size, at, "bicubic")
 }
 
-/// Decodes a frame near `at`, normally the keyframe before it. Much faster
-/// than [`extract_frame`] because frames between keyframes are skipped; good
-/// enough for thumbnails.
+/// Decodes a frame near `at`, normally the keyframe before it. Faster than
+/// [`extract_frame`] because frames between keyframes are skipped (a quarter
+/// faster on 1440p video, a third on 4K); good enough for thumbnails and for
+/// previewing a drag along the timeline.
 pub fn extract_keyframe(path: &Path, at: Duration, size: FrameSize) -> Result<RawFrame> {
     let fast_seek = |skip_to_keyframes: bool| {
         let mut command = base_command();
@@ -196,28 +205,20 @@ pub struct VideoStream {
 }
 
 impl VideoStream {
+    /// Starts decoding. `hardware` lets ffmpeg decode on the GPU, which
+    /// takes noticeably longer to start and, up to 4K, no faster than the
+    /// CPU does; see [`MediaInfo::prefers_hardware_decode`](super::MediaInfo).
     pub fn spawn(
         path: &Path,
         start: Duration,
         size: FrameSize,
         frame_rate: f64,
         timing: Timing,
-    ) -> Result<Self> {
-        Self::spawn_with(path, start, size, frame_rate, timing, true)
-    }
-
-    /// [`spawn`](Self::spawn), choosing whether ffmpeg may decode on the GPU.
-    pub fn spawn_with(
-        path: &Path,
-        start: Duration,
-        size: FrameSize,
-        frame_rate: f64,
-        timing: Timing,
-        hwaccel: bool,
+        hardware: bool,
     ) -> Result<Self> {
         let first = timing.first_frame(start);
         let mut command = base_command();
-        if hwaccel {
+        if hardware {
             command.args(["-hwaccel", "auto"]);
         }
         command

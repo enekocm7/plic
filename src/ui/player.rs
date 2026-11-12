@@ -27,7 +27,7 @@ use crate::{
     audio::AudioOutput,
     ffmpeg::{self, CropRect, FrameSize, MediaInfo},
     markers::Markers,
-    playback::{MAX_FRAME_RATE, Playback, SPEEDS},
+    playback::{Playback, SPEEDS},
     timestamp,
     trim::{self, Segments, TrimRange},
     worker::WorkerPool,
@@ -86,12 +86,6 @@ struct Source {
     info: MediaInfo,
 }
 
-impl Source {
-    fn frame_rate(&self) -> f64 {
-        self.info.frame_rate.unwrap_or(30.0).min(MAX_FRAME_RATE)
-    }
-}
-
 /// The audio device, opened on first playback.
 enum AudioDevice {
     Unopened,
@@ -114,12 +108,23 @@ impl AudioDevice {
     }
 }
 
+/// How a paused frame is decoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StillQuality {
+    /// The exact frame at the position.
+    Exact,
+    /// The keyframe at or before the position: much quicker, so a drag along
+    /// the timeline keeps up, and replaced by the exact frame once the
+    /// pointer stops.
+    Fast,
+}
+
 /// Single-frame decodes for seeking while paused. Only one runs at a time;
 /// newer requests replace older queued ones so scrubbing never lags behind.
 #[derive(Default)]
 struct StillRequests {
     in_flight: bool,
-    queued: Option<Duration>,
+    queued: Option<(Duration, StillQuality)>,
 }
 
 /// Frames for the timeline's hover preview, one per step of the clip. Only
@@ -393,15 +398,7 @@ impl Player {
         } else {
             None
         };
-        let result = Playback::start(
-            &source.path,
-            from,
-            size,
-            source.frame_rate(),
-            self.speed,
-            source.info.timing(),
-            audio,
-        );
+        let result = Playback::start(&source.path, from, size, &source.info, self.speed, audio);
         self.apply_volume();
         match result {
             Ok(playback) => {
@@ -1175,8 +1172,19 @@ impl Player {
             .fit_within(viewport)
     }
 
-    /// Decodes the exact frame at `at` for display while paused.
+    /// Decodes the frame at `at` for display while paused: the exact one,
+    /// or while the timeline is being dragged a quick approximation that is
+    /// refined as soon as nothing newer is waiting.
     fn request_still(&mut self, at: Duration, cx: &mut Context<Self>) {
+        let quality = if self.drag.is_some() {
+            StillQuality::Fast
+        } else {
+            StillQuality::Exact
+        };
+        self.decode_still(at, quality, cx);
+    }
+
+    fn decode_still(&mut self, at: Duration, quality: StillQuality, cx: &mut Context<Self>) {
         let Some(source) = &self.source else {
             return;
         };
@@ -1184,7 +1192,7 @@ impl Player {
             return;
         }
         if self.stills.in_flight {
-            self.stills.queued = Some(at);
+            self.stills.queued = Some((at, quality));
             return;
         }
         self.stills.in_flight = true;
@@ -1194,7 +1202,12 @@ impl Player {
         let generation = self.generation;
         cx.spawn(async move |this, cx| {
             let frame = cx
-                .background_spawn(async move { ffmpeg::extract_frame(&path, at, size) })
+                .background_spawn(async move {
+                    match quality {
+                        StillQuality::Exact => ffmpeg::extract_frame(&path, at, size),
+                        StillQuality::Fast => ffmpeg::extract_keyframe(&path, at, size),
+                    }
+                })
                 .await;
             this.update(cx, |this, cx| {
                 if this.generation != generation {
@@ -1205,11 +1218,15 @@ impl Player {
                 if this.playback.is_none() {
                     match frame {
                         Ok(frame) => this.show_frame(frame),
+                        // A quick frame that fails is followed by an exact one.
+                        Err(_) if quality == StillQuality::Fast => {}
                         Err(error) => this.error = Some(format!("{error:#}").into()),
                     }
                 }
-                if let Some(next) = this.stills.queued.take() {
-                    this.request_still(next, cx);
+                if let Some((next, quality)) = this.stills.queued.take() {
+                    this.decode_still(next, quality, cx);
+                } else if quality == StillQuality::Fast && this.playback.is_none() {
+                    this.decode_still(this.position, StillQuality::Exact, cx);
                 }
                 cx.notify();
             })

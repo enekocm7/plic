@@ -413,13 +413,6 @@ fn info_of(path: &Path) -> MediaInfo {
     ffmpeg::probe(path).unwrap()
 }
 
-/// The rate the player decodes a clip at.
-fn play_rate(info: &MediaInfo) -> f64 {
-    info.frame_rate
-        .unwrap_or(30.0)
-        .min(crate::playback::MAX_FRAME_RATE)
-}
-
 // ---------------------------------------------------------------------------
 // Measurement helpers
 
@@ -461,9 +454,16 @@ fn wait_for_frame(stream: &mut VideoStream) -> Option<RawFrame> {
 
 /// Times of the first frame of every flash that `VideoStream` delivers
 /// between `from` and `from + window`, as stamped by the player pipeline.
-fn video_flashes(path: &Path, from: f64, window: f64, rate: f64, timing: Timing) -> Vec<f64> {
+fn video_flashes(
+    path: &Path,
+    from: f64,
+    window: f64,
+    rate: f64,
+    timing: Timing,
+    hardware: bool,
+) -> Vec<f64> {
     let size = FrameSize::new(160, 90);
-    let mut stream = VideoStream::spawn(path, secs(from), size, rate, timing).unwrap();
+    let mut stream = VideoStream::spawn(path, secs(from), size, rate, timing, hardware).unwrap();
     let mut flashes = Vec::new();
     let mut lit = false;
     while let Some(frame) = wait_for_frame(&mut stream) {
@@ -619,7 +619,7 @@ fn bench_seek_still() {
 
 /// What the player decodes for each step of a timeline drag.
 fn scrub_step(path: &Path, at: Duration, size: FrameSize) -> RawFrame {
-    ffmpeg::extract_frame(path, at, size).unwrap()
+    ffmpeg::extract_keyframe(path, at, size).unwrap()
 }
 
 #[test]
@@ -644,23 +644,17 @@ fn bench_playback_start() {
     let mut report = Report::new("playback_start");
     for (name, path) in video_fixtures() {
         let info = info_of(&path);
-        let (rate, timing) = (play_rate(&info), info.timing());
-        drop(VideoStream::spawn(&path, Duration::ZERO, VIEW, rate, timing).unwrap());
+        let (rate, timing) = (crate::playback::decode_rate(&info), info.timing());
+        drop(VideoStream::spawn(&path, Duration::ZERO, VIEW, rate, timing, false).unwrap());
         // The start of the clip, and a point well inside a group of pictures.
         for at in [0.0, 12.3] {
             for hwaccel in [true, false] {
                 let runs = (0..7)
                     .map(|_| {
                         time(|| {
-                            let mut stream = VideoStream::spawn_with(
-                                &path,
-                                secs(at),
-                                VIEW,
-                                rate,
-                                timing,
-                                hwaccel,
-                            )
-                            .unwrap();
+                            let mut stream =
+                                VideoStream::spawn(&path, secs(at), VIEW, rate, timing, hwaccel)
+                                    .unwrap();
                             wait_for_frame(&mut stream).unwrap()
                         })
                         .0
@@ -703,13 +697,12 @@ fn bench_decode_throughput() {
     let mut report = Report::new("decode_throughput");
     for (name, path) in video_fixtures() {
         let info = info_of(&path);
-        let (rate, timing) = (play_rate(&info), info.timing());
+        let (rate, timing) = (crate::playback::decode_rate(&info), info.timing());
         for hwaccel in [true, false] {
             let runs = (0..3)
                 .map(|_| {
                     let mut stream =
-                        VideoStream::spawn_with(&path, secs(10.0), VIEW, rate, timing, hwaccel)
-                            .unwrap();
+                        VideoStream::spawn(&path, secs(10.0), VIEW, rate, timing, hwaccel).unwrap();
                     let first = wait_for_frame(&mut stream).unwrap();
                     let started = Instant::now();
                     let mut frames = 0u32;
@@ -735,9 +728,16 @@ fn bench_decode_throughput() {
 
 fn sync_case(report: &mut Report, label: &str, fixture: &Fixture, from: f64, window: f64) {
     let info = info_of(&fixture.path);
-    let rate = play_rate(&info);
+    let rate = crate::playback::decode_rate(&info);
     let timing = info.timing();
-    let flashes = video_flashes(&fixture.path, from, window, rate, timing);
+    let flashes = video_flashes(
+        &fixture.path,
+        from,
+        window,
+        rate,
+        timing,
+        info.prefers_hardware_decode(),
+    );
     let beeps = audio_beeps(&fixture.path, from, window, timing);
 
     let video_error = worst_error(fixture.marks, &flashes);
