@@ -30,6 +30,7 @@ use crate::{
     ffmpeg::{self, AudioAdjust, FrameSize, MediaInfo, RawFrame, Transform},
     library::{self, ClipFile, Library},
     trim::{Segments, TrimRange},
+    watcher::FolderWatcher,
     worker::WorkerPool,
 };
 
@@ -37,6 +38,10 @@ use crate::{
 const SEEK_STEP_MS: i64 = 5_000;
 
 /// Thumbnails are decoded at twice their on-screen size for HiDPI displays.
+/// How long the folder must stay quiet before it is rescanned, so
+/// recordings that are still being written are not listed early.
+const WATCH_SETTLE: Duration = Duration::from_secs(2);
+
 const THUMBNAIL_SIZE: FrameSize = FrameSize::new(160, 90);
 
 /// Metadata that is loaded in the background after the folder is listed.
@@ -122,6 +127,8 @@ pub struct PlicApp {
     pub(super) editor: Editor,
     /// The clips folder.
     pub(super) folder: Option<PathBuf>,
+    /// Keeps the clips folder watched; dropped when another folder opens.
+    watch: Option<(FolderWatcher, Task<()>)>,
     pub(super) clips: Vec<ClipEntry>,
     /// Subfolders that exported clips can be saved into.
     pub(super) folders: Vec<PathBuf>,
@@ -172,6 +179,7 @@ impl PlicApp {
             player,
             editor: Editor::new(window, cx),
             folder: None,
+            watch: None,
             clips: Vec::new(),
             folders: Vec::new(),
             last_folder: None,
@@ -226,6 +234,7 @@ impl PlicApp {
         if self.folder.as_ref() != Some(&folder) {
             self.last_folder = None;
         }
+        self.watch_folder(&folder, window, cx);
         self.folder = Some(folder);
         self.sync_folder_choices(window, cx);
         self.selected = None;
@@ -248,6 +257,102 @@ impl PlicApp {
             self.load_settled_details(cx);
         }
         cx.notify();
+    }
+
+    /// Picks up recordings that appear in the folder, and notices ones that
+    /// disappear, without touching the drafts of the other clips.
+    fn watch_folder(&mut self, folder: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        self.watch = None;
+        let Ok((watcher, mut changes)) = FolderWatcher::start(folder) else {
+            return;
+        };
+        let task = cx.spawn_in(window, async move |this, cx| {
+            use futures::StreamExt as _;
+            while changes.next().await.is_some() {
+                // Wait for a quiet moment: writes arrive in a stream.
+                loop {
+                    cx.background_executor().timer(WATCH_SETTLE).await;
+                    let mut more = false;
+                    while changes.try_recv().is_ok() {
+                        more = true;
+                    }
+                    if !more {
+                        break;
+                    }
+                }
+                let refreshed = this.update_in(cx, |this, window, cx| {
+                    this.refresh_folder(window, cx);
+                });
+                if refreshed.is_err() {
+                    return;
+                }
+            }
+        });
+        self.watch = Some((watcher, task));
+    }
+
+    /// Merges a fresh scan into the lists: new recordings are added and
+    /// vanished ones dropped, while every other clip keeps its draft.
+    fn refresh_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(folder) = self.folder.clone() else {
+            return;
+        };
+        let Ok(library) = Library::scan(&folder) else {
+            return;
+        };
+        let mut changed = false;
+
+        let gone: Vec<PathBuf> = self
+            .clips
+            .iter()
+            .filter(|entry| entry.status == ClipStatus::Pending)
+            .filter(|entry| {
+                !library
+                    .clips
+                    .iter()
+                    .any(|file| file.path == entry.file.path)
+            })
+            .map(|entry| entry.file.path.clone())
+            .collect();
+        for path in gone {
+            if let Some(index) = self.index_of(&path) {
+                let entry = self.take_clip(index, window, cx);
+                self.stale_images.extend(entry.thumbnail);
+                changed = true;
+            }
+        }
+
+        for file in library.clips {
+            if self.index_of(&file.path).is_some() || self.settled_index_of(&file.path).is_some() {
+                continue;
+            }
+            let path = file.path.clone();
+            let key = file.file_name().to_lowercase();
+            let position = self
+                .clips
+                .partition_point(|clip| clip.file.file_name().to_lowercase() < key);
+            self.clips.insert(position, ClipEntry::new(file));
+            if let Some(selected) = &mut self.selected
+                && *selected >= position
+            {
+                *selected += 1;
+            }
+            self.load_details(path, cx);
+            changed = true;
+        }
+
+        if library.folders != self.folders {
+            self.folders = library.folders;
+            self.sync_folder_choices(window, cx);
+            changed = true;
+        }
+        if changed {
+            // A clip may have appeared in an empty library.
+            if self.selected.is_none() && self.settled_selected.is_none() {
+                self.select(0, window, cx);
+            }
+            cx.notify();
+        }
     }
 
     fn load_settled_details(&mut self, cx: &mut Context<Self>) {
