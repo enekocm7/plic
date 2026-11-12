@@ -6,6 +6,7 @@ mod audio;
 mod clipboard;
 mod ffmpeg;
 mod library;
+mod naming;
 mod playback;
 mod scheduler;
 mod settings;

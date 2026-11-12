@@ -24,6 +24,9 @@ pub struct Settings {
     /// Name of the subfolder exports go to when nothing else was chosen.
     /// Empty uses the one used last.
     pub default_destination: String,
+    /// Template for export names, such as `{folder}-{date}-{n}`. Empty
+    /// keeps the clip's own name. `{n}` counts up past names already used.
+    pub name_template: String,
 }
 
 impl Default for Settings {
@@ -32,6 +35,7 @@ impl Default for Settings {
             seek_step_secs: DEFAULT_SEEK_STEP_SECS,
             archive_folder: DEFAULT_ARCHIVE_FOLDER.to_owned(),
             default_destination: String::new(),
+            name_template: String::new(),
         }
     }
 }
@@ -45,6 +49,7 @@ impl Settings {
             self.archive_folder = DEFAULT_ARCHIVE_FOLDER.to_owned();
         }
         self.default_destination = self.default_destination.trim().to_owned();
+        self.name_template = self.name_template.trim().to_owned();
         self
     }
 }
@@ -109,6 +114,7 @@ mod tests {
             seek_step_secs: 0,
             archive_folder: "a/b".into(),
             default_destination: "  Best  ".into(),
+            name_template: String::new(),
         }
         .sanitized();
         assert_eq!(settings.seek_step_secs, 1);

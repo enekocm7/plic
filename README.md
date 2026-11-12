@@ -123,3 +123,8 @@ name of the folder originals move to after export (`edited` by default) and
 the default destination folder. They are saved as `settings.json` in the
 `plic` folder of your OS config directory (`%APPDATA%` on Windows) and can
 also be edited there by hand.
+
+A **name template** in the settings pre-fills export names, e.g.
+`{folder}-{date}-{n}`. `{name}` is the clip's own name, `{folder}` the clips
+folder, `{date}` the day it was recorded, and `{n}` counts up past names that
+already exist in the destination.

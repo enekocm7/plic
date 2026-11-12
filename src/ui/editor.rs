@@ -193,6 +193,7 @@ impl Editor {
 impl PlicApp {
     /// Fills the panel with the selected clip's draft.
     pub(super) fn sync_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.apply_name_template();
         let (name, folder) = match self.current() {
             Some(entry) => (
                 entry.name.clone(),
@@ -253,6 +254,38 @@ impl PlicApp {
         self.editor
             .end
             .update(cx, |input, cx| input.set_value(end, window, cx));
+    }
+
+    /// Names the selected clip from the name template, once.
+    fn apply_name_template(&mut self) {
+        let template = crate::settings::get().name_template;
+        let Some(index) = self.selected.filter(|_| !template.is_empty()) else {
+            return;
+        };
+        let entry = &self.clips[index];
+        if entry.templated {
+            return;
+        }
+        let folder = self.folder.as_deref().map(display_name);
+        let context = crate::naming::TemplateContext {
+            name: &entry.file.stem(),
+            folder: folder.as_deref().unwrap_or_default(),
+            recorded: entry.file.modified,
+        };
+        let destination = self.destination(entry);
+        let extension = self.editor.format.extension();
+        let name = crate::naming::expand(&template, &context, |candidate| {
+            destination
+                .is_some_and(|folder| folder.join(format!("{candidate}.{extension}")).exists())
+                || self.clips.iter().enumerate().any(|(other, clip)| {
+                    other != index && clip.templated && clip.name.eq_ignore_ascii_case(candidate)
+                })
+        });
+        let entry = &mut self.clips[index];
+        entry.templated = true;
+        if library::validate_file_stem(&name).is_ok() {
+            entry.name = name;
+        }
     }
 
     /// Replaces the destination choices after the folder list changed.

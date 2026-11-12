@@ -69,6 +69,8 @@ pub struct ClipEntry {
     /// Destination chosen for this clip, if it differs from the default.
     pub folder: Option<PathBuf>,
     pub status: ClipStatus,
+    /// Whether the name template has already filled in this clip's name.
+    pub templated: bool,
 }
 
 impl ClipEntry {
@@ -89,6 +91,7 @@ impl ClipEntry {
             audio_adjust: AudioAdjust::default(),
             folder: None,
             status: ClipStatus::Pending,
+            templated: false,
         }
     }
 
