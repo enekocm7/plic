@@ -283,6 +283,11 @@ fn fill_output<T: SizedSample + FromSample<f32>>(
 /// with silence when the audio begins after `from`, or trims it when it
 /// begins before. Without that, a recording whose audio starts a little
 /// after its video would play early by the difference.
+///
+/// The sound is converted to the device's rate first, because `first_pts`
+/// counts samples at the rate going into the filter: counted at a 44.1 kHz
+/// device's rate but applied to a 48 kHz clip, a start one minute in came
+/// out almost five seconds late.
 pub(crate) fn feeder_command(
     path: &Path,
     from: Duration,
@@ -292,7 +297,7 @@ pub(crate) fn feeder_command(
     channels: u16,
 ) -> Command {
     let first_sample = (timing.container_time(from) * f64::from(sample_rate)).round() as i64;
-    let mut filters = format!("aresample=async=1:first_pts={first_sample}");
+    let mut filters = format!("aresample={sample_rate},aresample=async=1:first_pts={first_sample}");
     if (speed - 1.0).abs() > f64::EPSILON {
         filters.push_str(&format!(",atempo={speed:.3}"));
     }
@@ -449,7 +454,7 @@ mod tests {
         // 3.0 seconds on the container clock, in samples.
         assert_eq!(
             arguments[position("-af") + 1],
-            "aresample=async=1:first_pts=144000"
+            "aresample=48000,aresample=async=1:first_pts=144000"
         );
 
         let fast = feeder_command(
@@ -462,7 +467,7 @@ mod tests {
         );
         assert_eq!(
             arguments_of(&fast, "-af"),
-            "aresample=async=1:first_pts=22050,atempo=1.500"
+            "aresample=44100,aresample=async=1:first_pts=22050,atempo=1.500"
         );
     }
 
