@@ -22,8 +22,9 @@ pub struct Settings {
     pub seek_step_secs: u32,
     /// Folder, inside the clips folder, that exported originals move to.
     pub archive_folder: String,
-    /// Name of the subfolder exports go to when nothing else was chosen.
-    /// Empty uses the one used last.
+    /// Name of the subfolder, or "Clips folder" for the clips folder itself,
+    /// that exports go to when nothing else was chosen. Empty uses the one
+    /// used last.
     pub default_destination: String,
     /// Template for export names, such as `{folder}-{date}-{n}`. Empty
     /// keeps the clip's own name. `{n}` counts up past names already used.
