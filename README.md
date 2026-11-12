@@ -24,7 +24,10 @@ or `libsvtav1`/`libaom-av1`.
 plic [FOLDER]
 ```
 
-Without a folder argument, plic opens the current directory.
+Without a folder argument, plic reopens the folder from last time, or the
+current directory the first time. The arrow next to **Open folder** lists
+recent folders. The window size and position, volume and theme are
+remembered too, in `state.json` next to `settings.json`.
 
 1. Pick a clip on the left. It starts in the viewer.
 2. Trim it by dragging the yellow handles on the timeline, by pressing
