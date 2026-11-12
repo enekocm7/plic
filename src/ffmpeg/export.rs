@@ -22,10 +22,10 @@ use std::{
 use anyhow::{Context, Result, bail};
 
 use super::{
-    CommandExt as _, FrameSize, Transform,
+    CommandExt as _, FrameSize, OutputLimits, Transform,
     encoder::{self, VideoEncoding},
     graph::{self, AudioAdjust, AudioPlan},
-    seconds_arg,
+    seconds_arg, transform,
 };
 use crate::trim::TrimRange;
 
@@ -61,6 +61,10 @@ pub struct ExportRequest {
     /// Display size of the source, needed to crop it.
     pub video_size: Option<FrameSize>,
     pub transform: Transform,
+    /// Caps on the output's size and frame rate.
+    pub limits: OutputLimits,
+    /// Frame rate of the source, so a cap never adds frames.
+    pub frame_rate: Option<f64>,
 }
 
 /// Lets the UI cancel a running export.
@@ -121,9 +125,11 @@ pub fn export(
     if output.exists() {
         return Err(anyhow::anyhow!("{} already exists", output.display()).into());
     }
-    if request.mode == ExportMode::StreamCopy && !request.transform.is_identity() {
+    if request.mode == ExportMode::StreamCopy
+        && (!request.transform.is_identity() || !request.limits.is_none())
+    {
         return Err(anyhow::anyhow!(
-            "cropping, rotating and flipping need re-encoding; turn off Lossless"
+            "cropping, rotating, flipping and downscaling need re-encoding; turn off Lossless"
         )
         .into());
     }
@@ -144,7 +150,12 @@ pub fn export(
         tracks: &request.audio_tracks,
         chain: audio_filter.as_deref(),
     };
-    let video_filter = request.transform.filter(request.video_size);
+    let video_filter = transform::video_filter(
+        &request.transform,
+        &request.limits,
+        request.video_size,
+        request.frame_rate,
+    );
     let parts = Parts {
         request,
         ranges: &ranges,
@@ -732,6 +743,8 @@ mod tests {
             audio_adjust: AudioAdjust::default(),
             video_size: Some(FrameSize::new(1280, 720)),
             transform: Transform::default(),
+            limits: OutputLimits::default(),
+            frame_rate: Some(30.0),
         };
         let output = export(&request, &CancelToken::default(), |_| {}).unwrap();
         let size = fs::metadata(&output).unwrap().len();

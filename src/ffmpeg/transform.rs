@@ -1,7 +1,7 @@
-//! Cropping, rotating and flipping the exported picture.
+//! Cropping, rotating, flipping and downscaling the exported picture.
 //!
-//! All of it is a video filter, so an export with a transform is always
-//! re-encoded.
+//! All of it is a video filter, so an export with a transform or limits is
+//! always re-encoded.
 
 use super::FrameSize;
 
@@ -163,6 +163,21 @@ impl Transform {
         })
     }
 
+    /// The size of the picture after cropping and rotating a `source`-sized
+    /// frame.
+    pub fn output_size(&self, source: FrameSize) -> FrameSize {
+        let (width, height) = self
+            .crop_pixels(source)
+            .map_or((source.width, source.height), |(_, _, width, height)| {
+                (width, height)
+            });
+        if self.rotation.is_sideways() {
+            FrameSize::new(height, width)
+        } else {
+            FrameSize::new(width, height)
+        }
+    }
+
     /// The video filter chain that applies this transform to a frame of
     /// `source` size (after the source's own rotation metadata), or `None`
     /// when the picture is left alone.
@@ -187,9 +202,110 @@ impl Transform {
     }
 }
 
+/// Caps on the exported picture's size and frame rate. Never upscales.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct OutputLimits {
+    /// The most pixels the shorter side may have: 1080 for "1080p", which
+    /// is the width of a vertical video.
+    pub max_lines: Option<u32>,
+    pub max_fps: Option<u32>,
+}
+
+impl OutputLimits {
+    pub fn is_none(&self) -> bool {
+        self.max_lines.is_none() && self.max_fps.is_none()
+    }
+
+    /// The size a `size` picture is scaled down to, keeping its aspect ratio
+    /// with even sides, or `None` when it already fits.
+    pub fn scaled_size(&self, size: FrameSize) -> Option<FrameSize> {
+        let limit = self.max_lines?;
+        let short = size.width.min(size.height);
+        if short <= limit {
+            return None;
+        }
+        let scale = limit as f64 / short as f64;
+        let even = |value: f64| ((value / 2.0).round() as u32 * 2).max(2);
+        Some(FrameSize::new(
+            even(size.width as f64 * scale),
+            even(size.height as f64 * scale),
+        ))
+    }
+
+    /// Filters that apply the limits to a `size` picture at `frame_rate`.
+    pub fn filters(&self, size: Option<FrameSize>, frame_rate: Option<f64>) -> Vec<String> {
+        let mut filters = Vec::new();
+        if let Some(scaled) = size.and_then(|size| self.scaled_size(size)) {
+            filters.push(format!(
+                "scale={}:{}:flags=lanczos",
+                scaled.width, scaled.height
+            ));
+        }
+        if let Some(cap) = self.max_fps {
+            // An unknown rate is capped too; fps never adds frames.
+            if frame_rate.is_none_or(|rate| rate > cap as f64 + 0.5) {
+                filters.push(format!("fps={cap}"));
+            }
+        }
+        filters
+    }
+}
+
+/// The whole video filter chain: the transform, then the limits applied to
+/// the transformed picture.
+pub fn video_filter(
+    transform: &Transform,
+    limits: &OutputLimits,
+    source: Option<FrameSize>,
+    frame_rate: Option<f64>,
+) -> Option<String> {
+    let mut filters: Vec<String> = transform.filter(source).into_iter().collect();
+    filters.extend(limits.filters(source.map(|size| transform.output_size(size)), frame_rate));
+    (!filters.is_empty()).then(|| filters.join(","))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn limits_scale_down_by_the_short_side_and_cap_the_rate() {
+        let hd = OutputLimits {
+            max_lines: Some(720),
+            max_fps: Some(30),
+        };
+        assert_eq!(
+            hd.filters(Some(FrameSize::new(2560, 1440)), Some(60.0)),
+            ["scale=1280:720:flags=lanczos", "fps=30"]
+        );
+        // Vertical video: 720p means 720 wide.
+        assert_eq!(
+            hd.scaled_size(FrameSize::new(1080, 1920)),
+            Some(FrameSize::new(720, 1280))
+        );
+        // Never upscaled, and a slower source keeps its rate.
+        assert!(
+            hd.filters(Some(FrameSize::new(640, 360)), Some(30.0))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn limits_apply_after_the_crop() {
+        let transform = Transform {
+            crop: Some(CropAspect::Tall),
+            ..Transform::identity()
+        };
+        let limits = OutputLimits {
+            max_lines: Some(480),
+            max_fps: None,
+        };
+        // The 606x1080 vertical crop is 606 wide, scaled to 480 wide.
+        assert_eq!(
+            video_filter(&transform, &limits, Some(HD), None).as_deref(),
+            Some("crop=606:1080:657:0,scale=480:856:flags=lanczos")
+        );
+    }
 
     const HD: FrameSize = FrameSize::new(1920, 1080);
 

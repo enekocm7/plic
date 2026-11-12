@@ -49,7 +49,9 @@ game and microphone tracks are mixed into one; untick everything to drop
 the sound. A gain slider and **Normalize loudness** (to -14 LUFS) change the
 exported level without touching the viewer's volume.
 
-Pick a **Size** (10, 25, 50 or 100 MB) to fit an upload limit: plic works
+Cap the **Size** at 1080p, 720p or 480p (by the shorter side, so vertical
+video works too) and the **Rate** at 60 or 30 fps; plic never upscales or
+adds frames. Pick a **File** size (10, 25, 50 or 100 MB) to fit an upload limit: plic works
 out the bitrate from the export's length and encodes in two passes with
 the codec's software encoder, which lands just under the size.
 

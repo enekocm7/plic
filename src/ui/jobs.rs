@@ -151,6 +151,13 @@ impl PlicApp {
                     audio_adjust: entry.audio_adjust,
                     video_size: info.video_size,
                     transform: entry.transform,
+                    // Lossless keeps the picture as it is.
+                    limits: if self.editor.mode == ffmpeg::ExportMode::Reencode {
+                        self.editor.limits
+                    } else {
+                        ffmpeg::OutputLimits::default()
+                    },
+                    frame_rate: info.frame_rate,
                 })
             })
             .collect()

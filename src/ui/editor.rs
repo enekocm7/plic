@@ -44,6 +44,12 @@ pub const PANEL_WIDTH: f32 = 320.;
 /// Destination folder names, filtered as the user types.
 type FolderList = SearchableVec<SharedString>;
 
+/// Resolutions offered as caps, by the picture's shorter side.
+const RESOLUTIONS: [u32; 3] = [1080, 720, 480];
+
+/// Frame rates offered as caps.
+const FRAME_RATE_CAPS: [u32; 2] = [60, 30];
+
 /// Sizes offered as export targets, in megabytes: common upload limits.
 const TARGET_SIZES_MB: [u64; 4] = [10, 25, 50, 100];
 
@@ -93,6 +99,8 @@ pub struct Editor {
     pub(super) mode: ExportMode,
     /// Codec and quality of re-encoded exports.
     pub(super) video: ffmpeg::VideoEncoding,
+    /// Resolution and frame rate caps of re-encoded exports.
+    pub(super) limits: ffmpeg::OutputLimits,
     /// Whether several segments become one file or one file each.
     pub(super) join: bool,
     /// Keyframe at or before a clip's start, by clip and requested start.
@@ -162,6 +170,7 @@ impl Editor {
             export_error: None,
             mode: ExportMode::default(),
             video: ffmpeg::VideoEncoding::default(),
+            limits: ffmpeg::OutputLimits::default(),
             join: true,
             keyframes: HashMap::new(),
             keyframe_pending: false,
@@ -1127,6 +1136,12 @@ impl PlicApp {
         cx.notify();
     }
 
+    fn set_limits(&mut self, edit: impl FnOnce(&mut ffmpeg::OutputLimits), cx: &mut Context<Self>) {
+        edit(&mut self.editor.limits);
+        self.editor.export_error = None;
+        cx.notify();
+    }
+
     fn set_target_size(&mut self, megabytes: Option<u64>, cx: &mut Context<Self>) {
         self.editor.video.target_size = megabytes.map(|megabytes| megabytes * 1024 * 1024);
         self.editor.export_error = None;
@@ -1196,11 +1211,42 @@ impl PlicApp {
             .target_size
             .zip(length)
             .and_then(|(target, length)| ffmpeg::target_bitrates(target, length, with_audio).err());
+        let limits = self.editor.limits;
+        let resolutions = std::iter::once(None)
+            .chain(RESOLUTIONS.iter().copied().map(Some))
+            .map(|lines| {
+                Button::new(SharedString::from(format!("lines-{}", lines.unwrap_or(0))))
+                    .ghost()
+                    .xsmall()
+                    .flex_1()
+                    .label(lines.map_or("Source".to_string(), |lines| format!("{lines}p")))
+                    .selected(limits.max_lines == lines)
+                    .disabled(!enabled)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.set_limits(|limits| limits.max_lines = lines, cx)
+                    }))
+            });
+        let rates = std::iter::once(None)
+            .chain(FRAME_RATE_CAPS.iter().copied().map(Some))
+            .map(|fps| {
+                Button::new(SharedString::from(format!("fps-{}", fps.unwrap_or(0))))
+                    .ghost()
+                    .xsmall()
+                    .flex_1()
+                    .label(fps.map_or("Source".to_string(), |fps| format!("{fps} fps")))
+                    .selected(limits.max_fps == fps)
+                    .disabled(!enabled)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.set_limits(|limits| limits.max_fps = fps, cx)
+                    }))
+            });
         v_flex()
             .gap_1()
             .child(row("Codec").child(h_flex().flex_1().gap_0p5().children(codecs)))
+            .child(row("Size").child(h_flex().flex_1().gap_0p5().children(resolutions)))
+            .child(row("Rate").child(h_flex().flex_1().gap_0p5().children(rates)))
             .child(row("Quality").child(h_flex().flex_1().gap_0p5().children(qualities)))
-            .child(row("Size").child(h_flex().flex_1().gap_0p5().children(sizes)))
+            .child(row("File").child(h_flex().flex_1().gap_0p5().children(sizes)))
             .when_some(size_problem, |column, problem| {
                 column.child(
                     div()
