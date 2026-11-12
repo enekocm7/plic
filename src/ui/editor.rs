@@ -34,7 +34,7 @@ use super::app::{ClipEntry, ClipStatus, PlicApp, display_name};
 use super::library_panel::format_size;
 use super::{AddSegment, SplitAtPlayhead};
 use crate::{
-    ffmpeg::{self, Codec, CropAspect, ExportMode, Quality, Transform},
+    ffmpeg::{self, Animation, Codec, CropAspect, ExportMode, Format, Quality, Transform},
     library, timestamp,
     trim::{self, TrimRange},
 };
@@ -101,6 +101,10 @@ pub struct Editor {
     pub(super) video: ffmpeg::VideoEncoding,
     /// Resolution and frame rate caps of re-encoded exports.
     pub(super) limits: ffmpeg::OutputLimits,
+    /// MP4, GIF or WebP.
+    pub(super) format: Format,
+    /// Width and frame rate of GIF and WebP exports.
+    pub(super) animation: Animation,
     /// Whether several segments become one file or one file each.
     pub(super) join: bool,
     /// Keyframe at or before a clip's start, by clip and requested start.
@@ -171,6 +175,8 @@ impl Editor {
             mode: ExportMode::default(),
             video: ffmpeg::VideoEncoding::default(),
             limits: ffmpeg::OutputLimits::default(),
+            format: Format::default(),
+            animation: Animation::default(),
             join: true,
             keyframes: HashMap::new(),
             keyframe_pending: false,
@@ -648,6 +654,7 @@ impl PlicApp {
     fn render_segments(&self, entry: &ClipEntry, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let segments = &entry.segments;
+        let extension = SharedString::from(format!(".{}", self.editor.format.extension()));
         let duration = entry.info().and_then(|info| info.duration);
         let active = segments.active_index();
         let multiple = segments.len() > 1;
@@ -804,7 +811,7 @@ impl PlicApp {
                                 div()
                                     .text_xs()
                                     .text_color(theme.muted_foreground)
-                                    .child(".mp4"),
+                                    .child(extension.clone()),
                             ),
                         ),
                 )
@@ -1136,6 +1143,81 @@ impl PlicApp {
         cx.notify();
     }
 
+    fn set_format(&mut self, format: Format, cx: &mut Context<Self>) {
+        self.editor.format = format;
+        self.editor.export_error = None;
+        cx.notify();
+    }
+
+    fn set_animation(&mut self, edit: impl FnOnce(&mut Animation), cx: &mut Context<Self>) {
+        edit(&mut self.editor.animation);
+        cx.notify();
+    }
+
+    /// The MP4 / GIF / WebP choice.
+    fn render_format(&self, enabled: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let format = self.editor.format;
+        h_flex().gap_0p5().children(Format::ALL.map(|choice| {
+            Button::new(SharedString::from(format!("format-{}", choice.label())))
+                .ghost()
+                .xsmall()
+                .flex_1()
+                .label(choice.label())
+                .selected(format == choice)
+                .disabled(!enabled)
+                .on_click(cx.listener(move |this, _, _, cx| this.set_format(choice, cx)))
+        }))
+    }
+
+    /// Width and frame rate of an animated export.
+    fn render_animation(&self, enabled: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let animation = self.editor.animation;
+        let row = |label: &'static str| {
+            h_flex().gap_2().child(
+                div()
+                    .w(px(48.))
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(label),
+            )
+        };
+        let widths = Animation::WIDTHS.map(|width| {
+            Button::new(SharedString::from(format!("anim-width-{width}")))
+                .ghost()
+                .xsmall()
+                .flex_1()
+                .label(width.to_string())
+                .selected(animation.width == width)
+                .disabled(!enabled)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.set_animation(|animation| animation.width = width, cx)
+                }))
+        });
+        let rates = Animation::FRAME_RATES.map(|fps| {
+            Button::new(SharedString::from(format!("anim-fps-{fps}")))
+                .ghost()
+                .xsmall()
+                .flex_1()
+                .label(format!("{fps} fps"))
+                .selected(animation.fps == fps)
+                .disabled(!enabled)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.set_animation(|animation| animation.fps = fps, cx)
+                }))
+        });
+        v_flex()
+            .gap_1()
+            .child(row("Width").child(h_flex().flex_1().gap_0p5().children(widths)))
+            .child(row("Rate").child(h_flex().flex_1().gap_0p5().children(rates)))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child("Silent and looping. Keep it short: size grows fast."),
+            )
+    }
+
     fn set_limits(&mut self, edit: impl FnOnce(&mut ffmpeg::OutputLimits), cx: &mut Context<Self>) {
         edit(&mut self.editor.limits);
         self.editor.export_error = None;
@@ -1272,7 +1354,9 @@ impl PlicApp {
         let transformed = self
             .current()
             .is_some_and(|entry| !entry.transform.is_identity());
-        let lossless = self.editor.mode == ExportMode::StreamCopy && !transformed;
+        let animated = self.editor.format.is_animation();
+        let lossless = self.editor.mode == ExportMode::StreamCopy && !transformed && !animated;
+        let extension = SharedString::from(format!(".{}", self.editor.format.extension()));
         // Resolved before `entry` borrows `self` for the rest of the render.
         let keyframe = match self.current() {
             Some(entry) if lossless && entry.info().is_some() => {
@@ -1344,7 +1428,20 @@ impl PlicApp {
         // With a target size the file lands just under it; otherwise the
         // source's bitrate is the best cheap guess.
         let target = self.editor.video.target_size.filter(|_| !lossless);
-        let estimate = match target {
+        let animation_size = entry
+            .and_then(|entry| entry.info()?.video_size.map(|size| (entry, size)))
+            .zip(length)
+            .filter(|_| animated)
+            .map(|((entry, size), length)| {
+                let size = entry.transform.output_size(size);
+                format_size(
+                    self.editor
+                        .animation
+                        .estimated_size(self.editor.format, size, length),
+                )
+            });
+        let estimate = match target.filter(|_| !animated) {
+            _ if animated => animation_size,
             Some(target) => Some(format_size(target)),
             None => entry
                 .zip(duration)
@@ -1462,7 +1559,7 @@ impl PlicApp {
                 std::path::MAIN_SEPARATOR
             )),
             (Some(folder), false) => Some(format!(
-                "{folder}{}{output_name}.mp4",
+                "{folder}{}{output_name}{extension}",
                 std::path::MAIN_SEPARATOR
             )),
             _ => None,
@@ -1498,7 +1595,7 @@ impl PlicApp {
                                         div()
                                             .text_xs()
                                             .text_color(theme.muted_foreground)
-                                            .child(".mp4"),
+                                            .child(extension.clone()),
                                     ),
                             ),
                         )
@@ -1546,16 +1643,26 @@ impl PlicApp {
                             panel.child(self.render_frame_controls(entry, cx))
                         })
                         .when_some(
-                            entry.filter(|entry| entry.info().is_some_and(|info| info.has_audio)),
+                            entry.filter(|entry| {
+                                !animated && entry.info().is_some_and(|info| info.has_audio)
+                            }),
                             |panel, entry| panel.child(self.render_audio_controls(entry, cx)),
                         )
                         .child(summary)
-                        .child(v_flex().gap_1p5().child(mode_row).children(snapped).when(
-                            !lossless,
-                            |column| {
-                                column.child(self.render_encoding(enabled, length, with_audio, cx))
-                            },
-                        ))
+                        .child(self.render_format(enabled, cx))
+                        .when(animated, |panel| {
+                            panel.child(self.render_animation(enabled, cx))
+                        })
+                        .when(!animated, |panel| {
+                            panel.child(v_flex().gap_1p5().child(mode_row).children(snapped).when(
+                                !lossless,
+                                |column| {
+                                    column.child(
+                                        self.render_encoding(enabled, length, with_audio, cx),
+                                    )
+                                },
+                            ))
+                        })
                         .child(
                             v_flex()
                                 .gap_1p5()

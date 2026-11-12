@@ -3,6 +3,7 @@
 //! Using the CLI rather than linking libav keeps the build simple on every
 //! platform and lets ffmpeg pick hardware decoders and encoders on its own.
 
+mod animation;
 mod encoder;
 mod export;
 mod frames;
@@ -12,6 +13,7 @@ mod transform;
 
 use std::{process::Command, time::Duration};
 
+pub use animation::{Animation, Format};
 pub use encoder::{Codec, Quality, VideoEncoding, warm_up as warm_up_encoder};
 pub use export::{
     CancelToken, ExportError, ExportMode, ExportRequest, estimated_size, export, target_bitrates,

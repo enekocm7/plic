@@ -55,6 +55,10 @@ adds frames. Pick a **File** size (10, 25, 50 or 100 MB) to fit an upload limit:
 out the bitrate from the export's length and encodes in two passes with
 the codec's software encoder, which lands just under the size.
 
+Switch the format to **GIF** or **WebP** for short, silent loops: pick a
+width and frame rate, and the panel estimates the size. GIFs get a
+palette made from the clip itself.
+
 Turn on **Lossless** in the export panel to copy the video instead of
 re-encoding it: the export is near-instant and keeps the original quality,
 but the cut starts on the keyframe at or before the chosen start. The panel
