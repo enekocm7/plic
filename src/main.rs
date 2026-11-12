@@ -13,6 +13,7 @@ mod scheduler;
 mod timestamp;
 mod trim;
 mod ui;
+mod watcher;
 mod worker;
 
 use std::path::PathBuf;
