@@ -20,7 +20,7 @@ use crate::{
 const STRIP_HEIGHT: f32 = 44.;
 /// Room above the strip for the playhead knob.
 const STRIP_TOP: f32 = 18.;
-const HEIGHT: f32 = STRIP_TOP + STRIP_HEIGHT + 10.;
+pub(super) const HEIGHT: f32 = STRIP_TOP + STRIP_HEIGHT + 10.;
 const KNOB_SIZE: f32 = 12.;
 const INSET: f32 = 16.;
 const RADIUS: f32 = 6.;
@@ -50,6 +50,8 @@ pub struct TimelineState {
     pub filmstrip: Vec<Option<Arc<RenderImage>>>,
     /// Audio peaks from 0 to 1, evenly spread over the clip.
     pub waveform: Option<Arc<[f32]>>,
+    /// Where the pointer rests, marked with a faint line.
+    pub hover: Option<Duration>,
     pub drag: Option<Drag>,
     pub aspect_ratio: f32,
 }
@@ -211,6 +213,7 @@ pub fn render(state: TimelineState, cx: &mut Context<Player>) -> impl IntoElemen
         waveform: white().opacity(0.8),
         handle_grip: black().opacity(0.55),
         playhead: white(),
+        hover: white().opacity(0.5),
         knob_border: black().opacity(0.35),
     };
     let this = cx.entity().downgrade();
@@ -239,6 +242,9 @@ pub fn render(state: TimelineState, cx: &mut Context<Player>) -> impl IntoElemen
             if let Some(layout) = &layout {
                 paint_selection(window, strip, layout, &colors);
             }
+            if let Some(hover) = state.hover {
+                paint_hover(window, strip, scale.x(hover), &colors);
+            }
             paint_playhead(window, strip, scale.x(state.position), &colors);
 
             let hovered = hitbox
@@ -249,7 +255,7 @@ pub fn render(state: TimelineState, cx: &mut Context<Player>) -> impl IntoElemen
                 _ => CursorStyle::PointingHand,
             };
             window.set_cursor_style(cursor, &hitbox);
-            register_dragging(this.clone(), hitbox, scale, layout, strip, window);
+            register_dragging(this.clone(), hitbox, bounds, scale, layout, strip, window);
         },
     )
     .w_full()
@@ -264,6 +270,7 @@ struct Colors {
     waveform: Hsla,
     handle_grip: Hsla,
     playhead: Hsla,
+    hover: Hsla,
     knob_border: Hsla,
 }
 
@@ -412,6 +419,14 @@ fn paint_selection(window: &mut Window, strip: Bounds<Pixels>, layout: &Layout, 
     }
 }
 
+fn paint_hover(window: &mut Window, strip: Bounds<Pixels>, x: Pixels, colors: &Colors) {
+    let line = Bounds {
+        origin: point(x - px(0.5), strip.origin.y),
+        size: size(px(1.), strip.size.height),
+    };
+    window.paint_quad(fill(line, colors.hover));
+}
+
 fn paint_playhead(window: &mut Window, strip: Bounds<Pixels>, x: Pixels, colors: &Colors) {
     let line = Bounds {
         origin: point(x - px(1.), strip.origin.y - px(6.)),
@@ -439,6 +454,7 @@ fn pick(handles: Option<Handles>, position: Point<Pixels>, strip_top: Pixels) ->
 fn register_dragging(
     this: WeakEntity<Player>,
     hitbox: Hitbox,
+    bounds: Bounds<Pixels>,
     scale: Scale,
     layout: Option<Layout>,
     strip: Bounds<Pixels>,
@@ -448,6 +464,7 @@ fn register_dragging(
     let strip_top = strip.origin.y;
     window.on_mouse_event({
         let this = this.clone();
+        let hitbox = hitbox.clone();
         move |event: &MouseDownEvent, phase, window, cx| {
             if phase != DispatchPhase::Bubble
                 || event.button != MouseButton::Left
@@ -477,11 +494,24 @@ fn register_dragging(
     window.on_mouse_event({
         let this = this.clone();
         move |event: &MouseMoveEvent, phase, window, cx| {
-            if phase != DispatchPhase::Bubble || event.pressed_button != Some(MouseButton::Left) {
+            if phase != DispatchPhase::Bubble {
                 return;
             }
+            if event.pressed_button == Some(MouseButton::Left) {
+                this.update(cx, |player, cx| {
+                    player.drag_to(scale.time(event.position.x), window, cx);
+                })
+                .ok();
+                return;
+            }
+            let hovered = hitbox.is_hovered(window);
             this.update(cx, |player, cx| {
-                player.drag_to(scale.time(event.position.x), window, cx);
+                if hovered {
+                    let x = event.position.x - bounds.origin.x;
+                    player.hover_at(scale.time(event.position.x), x, bounds.size.width, cx);
+                } else {
+                    player.end_hover(cx);
+                }
             })
             .ok();
         }
