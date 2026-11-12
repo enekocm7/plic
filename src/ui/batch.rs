@@ -11,6 +11,7 @@ use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, WindowExt as _, 
 use gpui_kit::*;
 
 use super::app::{ClipStatus, PlicApp, display_name};
+use super::history::Change;
 use super::library_panel::List;
 use crate::library;
 
@@ -256,7 +257,7 @@ impl PlicApp {
                 .on_ok(move |_, window, cx| {
                     let paths = paths.clone();
                     this.update(cx, |this, cx| {
-                        this.run_on_files(paths, "delete", library::trash_clip, window, cx)
+                        this.run_on_files(paths, "delete", library::trash_clip, true, window, cx)
                     })
                     .ok();
                     true
@@ -279,6 +280,7 @@ impl PlicApp {
             paths,
             "move",
             move |path| library::move_into(path, &folder).map(drop),
+            false,
             window,
             cx,
         );
@@ -333,12 +335,14 @@ impl PlicApp {
     }
 
     /// Runs `operation` on each file off the UI thread, then drops the ones
-    /// it worked on from the list and reports any it did not.
+    /// it worked on from the list and reports any it did not. With
+    /// `deleting`, each clip that went to the recycle bin can be undone.
     fn run_on_files(
         &mut self,
         paths: Vec<PathBuf>,
         verb: &'static str,
         operation: impl Fn(&Path) -> anyhow::Result<()> + Send + 'static,
+        deleting: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -364,7 +368,12 @@ impl PlicApp {
                 let mut failures = Vec::new();
                 for (path, result) in results {
                     match result {
-                        Ok(()) => this.forget(&path, window, cx),
+                        Ok(()) => {
+                            if deleting {
+                                this.history.record(Change::Delete { path: path.clone() });
+                            }
+                            this.forget(&path, window, cx)
+                        }
                         Err(error) => failures.push(format!("{error:#}")),
                     }
                 }

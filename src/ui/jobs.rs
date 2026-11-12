@@ -310,6 +310,8 @@ impl PlicApp {
         }
         match result {
             Ok(output) if batch_done && !batch_failed => {
+                // Nothing is left to finish on this clip.
+                crate::drafts::forget(&job.request.source);
                 self.archive_exported(job, output, window, cx)
             }
             Ok(output) => {
@@ -388,6 +390,10 @@ impl PlicApp {
                             )
                         });
                         window.push_notification(Notification::success(message).title(title), cx);
+                        this.history.record(super::history::Change::Archive {
+                            original: source.clone(),
+                            archived: archived.clone(),
+                        });
                         if let Some(index) = index {
                             let entry = this.take_clip(index, window, cx);
                             this.settle(entry, archived);

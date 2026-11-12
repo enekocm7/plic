@@ -15,6 +15,11 @@ use crate::{
 /// Playback never decodes faster than this; higher rates only cost CPU.
 pub const MAX_FRAME_RATE: f64 = 60.0;
 
+/// The playback speeds offered, slowest first.
+pub const SPEEDS: [f64; 4] = [0.5, 1.0, 1.5, 2.0];
+const MIN_SPEED: f64 = 0.25;
+const MAX_SPEED: f64 = 4.0;
+
 /// How long playback waits for audio before starting without it.
 const AUDIO_START_TIMEOUT: Duration = Duration::from_millis(750);
 
@@ -23,13 +28,16 @@ const AUDIO_START_TIMEOUT: Duration = Duration::from_millis(750);
 struct WallClock {
     base: Duration,
     running_since: Option<Instant>,
+    /// Media seconds per real second.
+    speed: f64,
 }
 
 impl WallClock {
-    fn new(base: Duration) -> Self {
+    fn new(base: Duration, speed: f64) -> Self {
         Self {
             base,
             running_since: None,
+            speed,
         }
     }
 
@@ -37,7 +45,7 @@ impl WallClock {
         self.base
             + self
                 .running_since
-                .map_or(Duration::ZERO, |since| since.elapsed())
+                .map_or(Duration::ZERO, |since| since.elapsed().mul_f64(self.speed))
     }
 
     fn start(&mut self) {
@@ -68,6 +76,7 @@ pub struct Playback {
     created: Instant,
     started: bool,
     playing: bool,
+    speed: f64,
 }
 
 impl Playback {
@@ -76,20 +85,25 @@ impl Playback {
         from: Duration,
         size: FrameSize,
         frame_rate: f64,
+        speed: f64,
         audio: Option<&mut AudioOutput>,
     ) -> Result<Self> {
-        let frame_rate = frame_rate.clamp(1.0, MAX_FRAME_RATE);
+        let speed = speed.clamp(MIN_SPEED, MAX_SPEED);
+        // Faster playback shows more media frames per second; decode fewer
+        // so the display rate stays within bounds.
+        let frame_rate = frame_rate.clamp(1.0, MAX_FRAME_RATE / speed.max(1.0));
         let video = VideoStream::spawn(path, from, size, frame_rate)?;
         // A clip whose audio cannot be decoded still plays, silently.
-        let audio = audio.and_then(|output| output.start(path, from).ok());
+        let audio = audio.and_then(|output| output.start(path, from, speed).ok());
         Ok(Self {
             video,
             pending: None,
             audio,
-            clock: WallClock::new(from),
+            clock: WallClock::new(from, speed),
             created: Instant::now(),
             started: false,
             playing: true,
+            speed,
         })
     }
 
@@ -170,7 +184,7 @@ impl Playback {
             return;
         };
         if self.started && audio.is_exhausted() {
-            self.clock = WallClock::new(audio.position());
+            self.clock = WallClock::new(audio.position(), self.speed);
             self.audio = None;
             if self.playing {
                 self.clock.start();
@@ -181,5 +195,23 @@ impl Playback {
     /// True once every frame up to the end of the clip has been shown.
     pub fn is_finished(&self) -> bool {
         self.pending.is_none() && self.video.is_finished()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wall_clock_runs_at_its_speed() {
+        let mut clock = WallClock::new(Duration::from_secs(10), 2.0);
+        clock.running_since = Instant::now().checked_sub(Duration::from_secs(3));
+        let now = clock.now();
+        assert!(
+            now >= Duration::from_secs(16) && now < Duration::from_secs(17),
+            "{now:?}"
+        );
+        clock.stop();
+        assert!(clock.now() >= Duration::from_secs(16));
     }
 }

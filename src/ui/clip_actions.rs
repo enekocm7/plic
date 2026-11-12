@@ -155,7 +155,11 @@ impl PlicApp {
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             this.update_in(cx, |this, window, cx| match result {
-                Ok(()) => this.forget(&path, window, cx),
+                Ok(()) => {
+                    this.history
+                        .record(super::history::Change::Delete { path: path.clone() });
+                    this.forget(&path, window, cx)
+                }
                 Err(error) => {
                     window.push_notification(
                         Notification::error(format!("{error:#}"))
