@@ -16,10 +16,12 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use super::{
-    AddSegment, CONTEXT, CopyLastExport, DeleteClip, ExportClip, JumpToEnd, JumpToIn, JumpToOut,
-    JumpToStart, MarkIn, MarkOut, OpenFolder, Reload, ResetTrim, SaveFrame, SaveFrameJpeg,
-    SeekBackward, SeekForward, SelectNextClip, SelectPreviousClip, ShowShortcuts, SplitAtPlayhead,
-    StepBackward, StepForward, ToggleLoop, ToggleMute, TogglePlay, ToggleTheme,
+    AddSegment, CONTEXT, CopyLastExport, DeleteClip, ExitFullscreen, ExportClip, JumpToEnd,
+    JumpToIn, JumpToOut, JumpToStart, MarkIn, MarkOut, NextMarker, OpenFolder, PreviousMarker,
+    Reload, ResetTrim, SaveFrame, SaveFrameJpeg, SeekBackward, SeekForward, SelectNextClip,
+    SelectPreviousClip, ShowShortcuts, SplitAtPlayhead, StepBackward, StepForward,
+    ToggleFullscreen, ToggleLoop, ToggleMarker, ToggleMute, TogglePlay, ToggleTheme, TrimToMarkers,
+    clip_filter::ClipFilter,
     editor::Editor,
     frame_image,
     jobs::{ExportJob, FinishedExport},
@@ -118,8 +120,12 @@ impl ClipEntry {
 
 pub struct PlicApp {
     pub(super) focus: FocusHandle,
+    /// The viewer fills the window, hiding everything else.
+    fullscreen: bool,
     pub(super) player: Entity<Player>,
     pub(super) editor: Editor,
+    /// Search box, ordering and status filter of the clip list.
+    pub(super) filter: ClipFilter,
     /// The clips folder.
     pub(super) folder: Option<PathBuf>,
     pub(super) clips: Vec<ClipEntry>,
@@ -169,8 +175,10 @@ impl PlicApp {
             .detach();
         let mut app = Self {
             focus,
+            fullscreen: false,
             player,
             editor: Editor::new(window, cx),
+            filter: ClipFilter::new(window, cx),
             folder: None,
             clips: Vec::new(),
             folders: Vec::new(),
@@ -310,8 +318,14 @@ impl PlicApp {
         }
         self.selected = Some(index);
         self.settled_selected = None;
-        self.list_scroll
-            .scroll_to_item(index, ScrollStrategy::Nearest);
+        if let Some(row) = self
+            .visible(super::library_panel::List::Clips, cx)
+            .iter()
+            .position(|&visible| visible == index)
+        {
+            self.list_scroll
+                .scroll_to_item(row, ScrollStrategy::Nearest);
+        }
         self.show_selected_in_player(cx);
         self.sync_editor(window, cx);
         cx.notify();
@@ -330,8 +344,14 @@ impl PlicApp {
         }
         self.settled_selected = Some(index);
         self.selected = None;
-        self.settled_scroll
-            .scroll_to_item(index, ScrollStrategy::Nearest);
+        if let Some(row) = self
+            .visible(super::library_panel::List::Settled, cx)
+            .iter()
+            .position(|&visible| visible == index)
+        {
+            self.settled_scroll
+                .scroll_to_item(row, ScrollStrategy::Nearest);
+        }
         self.show_selected_in_player(cx);
         self.sync_editor(window, cx);
         cx.notify();
@@ -586,6 +606,57 @@ impl PlicApp {
         self.player.update(cx, |player, cx| player.toggle_mute(cx));
     }
 
+    fn toggle_marker(&mut self, _: &ToggleMarker, _: &mut Window, cx: &mut Context<Self>) {
+        self.player
+            .update(cx, |player, cx| player.toggle_marker(cx));
+    }
+
+    fn next_marker(&mut self, _: &NextMarker, window: &mut Window, cx: &mut Context<Self>) {
+        self.player
+            .update(cx, |player, cx| player.jump_to_next_marker(window, cx));
+    }
+
+    fn previous_marker(&mut self, _: &PreviousMarker, window: &mut Window, cx: &mut Context<Self>) {
+        self.player
+            .update(cx, |player, cx| player.jump_to_previous_marker(window, cx));
+    }
+
+    fn trim_to_markers(&mut self, _: &TrimToMarkers, _: &mut Window, cx: &mut Context<Self>) {
+        self.player
+            .update(cx, |player, cx| player.trim_between_markers(cx));
+    }
+
+    fn toggle_fullscreen(
+        &mut self,
+        _: &ToggleFullscreen,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_fullscreen(!self.fullscreen, window, cx);
+    }
+
+    fn exit_fullscreen(&mut self, _: &ExitFullscreen, window: &mut Window, cx: &mut Context<Self>) {
+        if self.fullscreen {
+            self.set_fullscreen(false, window, cx);
+        } else {
+            cx.propagate();
+        }
+    }
+
+    fn set_fullscreen(&mut self, fullscreen: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.fullscreen == fullscreen {
+            return;
+        }
+        self.fullscreen = fullscreen;
+        if window.is_fullscreen() != fullscreen {
+            window.toggle_fullscreen();
+        }
+        self.player
+            .update(cx, |player, cx| player.set_fullscreen(fullscreen, cx));
+        self.focus.focus(window, cx);
+        cx.notify();
+    }
+
     fn jump_to_start(&mut self, _: &JumpToStart, window: &mut Window, cx: &mut Context<Self>) {
         self.player
             .update(cx, |player, cx| player.seek(Duration::ZERO, window, cx));
@@ -605,19 +676,35 @@ impl PlicApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(selected) = self.settled_selected {
-            self.select_settled(selected.saturating_sub(1), window, cx);
-        } else if let Some(selected) = self.selected {
-            self.select(selected.saturating_sub(1), window, cx);
-        }
+        self.select_neighbour(-1, window, cx);
     }
 
     fn select_next(&mut self, _: &SelectNextClip, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(selected) = self.settled_selected {
-            self.select_settled(selected + 1, window, cx);
-        } else {
-            let next = self.selected.map_or(0, |selected| selected + 1);
-            self.select(next, window, cx);
+        self.select_neighbour(1, window, cx);
+    }
+
+    /// Moves the selection one row up or down the list as it is shown, in
+    /// whichever list the selection is in.
+    fn select_neighbour(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
+        use super::library_panel::List;
+        let (list, selected) = match (self.settled_selected, self.selected) {
+            (Some(selected), _) => (List::Settled, Some(selected)),
+            (None, selected) => (List::Clips, selected),
+        };
+        let rows = self.visible(list, cx);
+        let current = selected.and_then(|selected| rows.iter().position(|&row| row == selected));
+        let target = match current {
+            Some(current) => current
+                .saturating_add_signed(step)
+                .min(rows.len().saturating_sub(1)),
+            None => 0,
+        };
+        let Some(&index) = rows.get(target) else {
+            return;
+        };
+        match list {
+            List::Clips => self.select(index, window, cx),
+            List::Settled => self.select_settled(index, window, cx),
         }
     }
 
@@ -859,6 +946,12 @@ impl Render for PlicApp {
             .on_action(cx.listener(Self::jump_to_start))
             .on_action(cx.listener(Self::jump_to_end))
             .on_action(cx.listener(Self::toggle_mute))
+            .on_action(cx.listener(Self::toggle_marker))
+            .on_action(cx.listener(Self::next_marker))
+            .on_action(cx.listener(Self::previous_marker))
+            .on_action(cx.listener(Self::trim_to_markers))
+            .on_action(cx.listener(Self::toggle_fullscreen))
+            .on_action(cx.listener(Self::exit_fullscreen))
             .on_action(cx.listener(Self::mark_in))
             .on_action(cx.listener(Self::mark_out))
             .on_action(cx.listener(Self::reset_trim))
@@ -876,12 +969,14 @@ impl Render for PlicApp {
             .on_drop(cx.listener(|this, dropped: &ExternalPaths, window, cx| {
                 this.handle_drop(dropped, window, cx)
             }))
-            .child(self.render_title_bar(cx))
+            .when(!self.fullscreen, |this| {
+                this.child(self.render_title_bar(cx))
+            })
             .child(
                 h_flex()
                     .flex_1()
                     .min_h_0()
-                    .child(self.render_library(cx))
+                    .when(!self.fullscreen, |row| row.child(self.render_library(cx)))
                     .child(
                         v_flex()
                             .flex_1()
@@ -893,15 +988,16 @@ impl Render for PlicApp {
                                 MouseButton::Left,
                                 cx.listener(|this, _, window, cx| this.focus.focus(window, cx)),
                             )
-                            .when(self.viewed().is_some(), |column| {
+                            .when(self.viewed().is_some() && !self.fullscreen, |column| {
                                 column.child(self.render_clip_header(cx))
                             })
                             .child(div().flex_1().min_h_0().child(self.player.clone())),
                     )
                     // Kept while exports run, so their progress stays visible.
-                    .when(self.current().is_some() || !self.jobs.is_empty(), |row| {
-                        row.child(self.render_export_panel(cx))
-                    }),
+                    .when(
+                        !self.fullscreen && (self.current().is_some() || !self.jobs.is_empty()),
+                        |row| row.child(self.render_export_panel(cx)),
+                    ),
             )
     }
 }
