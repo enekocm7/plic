@@ -15,6 +15,7 @@ pub use export::{
     CancelToken, ExportError, ExportMode, ExportRequest, estimated_size, export, warm_up_encoder,
 };
 pub use frames::{FrameSize, RawFrame, VideoStream, extract_frame, extract_keyframe};
+pub use graph::{AudioAdjust, TARGET_LOUDNESS};
 pub use probe::{MediaInfo, keyframe_at_or_before, probe};
 pub use transform::{CropAspect, CropRect, Transform};
 

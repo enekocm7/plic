@@ -27,7 +27,7 @@ use super::{
     shortcuts,
 };
 use crate::{
-    ffmpeg::{self, FrameSize, MediaInfo, RawFrame, Transform},
+    ffmpeg::{self, AudioAdjust, FrameSize, MediaInfo, RawFrame, Transform},
     library::{self, ClipFile, Library},
     trim::{Segments, TrimRange},
     worker::WorkerPool,
@@ -67,6 +67,8 @@ pub struct ClipEntry {
     pub transform: Transform,
     /// Audio tracks to export, by `0:a:N` index; `None` keeps them all.
     pub audio_tracks: Option<Vec<usize>>,
+    /// Gain and loudness normalization for the exported sound.
+    pub audio_adjust: AudioAdjust,
     /// Destination chosen for this clip, if it differs from the default.
     pub folder: Option<PathBuf>,
     pub status: ClipStatus,
@@ -87,6 +89,7 @@ impl ClipEntry {
             segments: Segments::default(),
             transform: Transform::identity(),
             audio_tracks: None,
+            audio_adjust: AudioAdjust::default(),
             folder: None,
             status: ClipStatus::Pending,
         }
@@ -398,6 +401,7 @@ impl PlicApp {
         entry.segments = Segments::default();
         entry.transform = Transform::identity();
         entry.audio_tracks = None;
+        entry.audio_adjust = AudioAdjust::default();
         self.settled.insert(0, entry);
         if let Some(selected) = &mut self.settled_selected {
             *selected += 1;

@@ -140,6 +140,7 @@ impl PlicApp {
                     },
                     source_duration: info.duration,
                     audio_tracks: entry.export_tracks(),
+                    audio_adjust: entry.audio_adjust,
                     video_size: info.video_size,
                     transform: entry.transform,
                 })
