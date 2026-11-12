@@ -29,6 +29,11 @@ current directory the first time. The arrow next to **Open folder** lists
 recent folders. The window size and position, volume and theme are
 remembered too, in `state.json` next to `settings.json`.
 
+Unfinished work survives a restart: each clip's segments, export name and
+destination are kept in `drafts.json` in plic's data folder (`%APPDATA%\plic`
+on Windows), never next to the recordings, and are dropped once the clip
+has been exported. A recording replaced by a different file starts fresh.
+
 You can also drop a folder onto the window to open it, or a video file to open
 its folder with that clip selected. Dropped files are never moved.
 
@@ -145,3 +150,16 @@ A **name template** in the settings pre-fills export names, e.g.
 `{folder}-{date}-{n}`. `{name}` is the clip's own name, `{folder}` the clips
 folder, `{date}` the day it was recorded, and `{n}` counts up past names that
 already exist in the destination.
+
+Every keyboard shortcut can be changed under **Key bindings** in the same
+dialog. In `settings.json` only the changed ones are stored, by command name,
+each with a list of keys; an empty list unbinds a command:
+
+```json
+"key_bindings": {
+  "toggle_play": ["space", "p"],
+  "delete_clip": []
+}
+```
+
+The shortcuts reference (`?`) always shows the keys in effect.

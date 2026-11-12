@@ -43,6 +43,9 @@ use crate::{
 /// recordings that are still being written are not listed early.
 const WATCH_SETTLE: Duration = Duration::from_secs(2);
 
+/// How long after a change to a clip's draft it is written to disk.
+const DRAFT_SAVE_DELAY: Duration = Duration::from_secs(1);
+
 /// Thumbnails are decoded at twice their on-screen size for HiDPI displays.
 const THUMBNAIL_SIZE: FrameSize = FrameSize::new(160, 90);
 
@@ -103,6 +106,33 @@ impl ClipEntry {
             status: ClipStatus::Pending,
             templated: false,
         }
+    }
+
+    /// A clip to edit, with the trims, name and destination it was left
+    /// with last time.
+    fn restored(file: ClipFile) -> Self {
+        let mut entry = Self::new(file);
+        let Some(draft) = crate::drafts::get(&entry.file.path)
+            .filter(|draft| draft.matches_size(entry.file.size))
+        else {
+            return entry;
+        };
+        if let Some(segments) = draft.segments() {
+            entry.segments = segments;
+        }
+        if let Some(name) = draft.name {
+            entry.name = name;
+            // A name from last time is not overwritten by the template.
+            entry.templated = true;
+        }
+        entry.folder = draft.folder.filter(|folder| folder.is_dir());
+        entry
+    }
+
+    /// What is worth remembering about this clip until it is exported.
+    fn draft(&self) -> Option<crate::drafts::Draft> {
+        let name = (self.name != self.file.stem()).then(|| self.name.clone());
+        crate::drafts::Draft::new(self.file.size, &self.segments, name, self.folder.clone())
     }
 
     /// The audio tracks to export, in stream order.
@@ -177,6 +207,8 @@ pub struct PlicApp {
     /// GitHub is asked on its own thread so a slow network never delays the
     /// UI.
     pub(super) updates_worker: WorkerPool,
+    /// Whether changed drafts are about to be written.
+    saving_drafts: bool,
 }
 
 impl PlicApp {
@@ -222,6 +254,7 @@ impl PlicApp {
             update: None,
             checking_update: false,
             updates_worker: WorkerPool::new("update", 1),
+            saving_drafts: false,
         };
         if let Some(folder) = folder {
             app.load_folder(folder, window, cx);
@@ -243,7 +276,7 @@ impl PlicApp {
             .extend(old_entries.filter_map(|entry| entry.thumbnail));
         match Library::scan(&folder) {
             Ok(library) => {
-                self.clips = library.clips.into_iter().map(ClipEntry::new).collect();
+                self.clips = library.clips.into_iter().map(ClipEntry::restored).collect();
                 self.settled = library.settled.into_iter().map(ClipEntry::new).collect();
                 self.folders = library.folders;
                 self.load_error = None;
@@ -361,7 +394,7 @@ impl PlicApp {
             let position = self
                 .clips
                 .partition_point(|clip| clip.file.file_name().to_lowercase() < key);
-            self.clips.insert(position, ClipEntry::new(file));
+            self.clips.insert(position, ClipEntry::restored(file));
             if let Some(selected) = &mut self.selected
                 && *selected >= position
             {
@@ -935,6 +968,26 @@ impl PlicApp {
         Theme::change(mode, Some(window), cx);
     }
 
+    /// Keeps the selected clip's draft for the next run. Only clips still
+    /// to be edited have one; exported clips' drafts are dropped.
+    fn remember_draft(&mut self, cx: &mut Context<Self>) {
+        if let Some(entry) = self
+            .current()
+            .filter(|entry| entry.status == ClipStatus::Pending)
+        {
+            crate::drafts::put(&entry.file.path, entry.draft());
+        }
+        if crate::drafts::is_dirty() && !self.saving_drafts {
+            self.saving_drafts = true;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(DRAFT_SAVE_DELAY).await;
+                cx.background_spawn(async { crate::drafts::save() }).await;
+                this.update(cx, |this, _| this.saving_drafts = false).ok();
+            })
+            .detach();
+        }
+    }
+
     pub(super) fn current(&self) -> Option<&ClipEntry> {
         self.clips.get(self.selected?)
     }
@@ -1121,6 +1174,8 @@ impl Render for PlicApp {
         for image in self.stale_images.drain(..) {
             window.drop_image(image).ok();
         }
+        // Every edit to a draft ends in a render, so this catches them all.
+        self.remember_draft(cx);
         let theme = cx.theme();
         v_flex()
             .id("plic")
