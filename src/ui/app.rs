@@ -18,8 +18,8 @@ use gpui_kit::*;
 use super::{
     AddSegment, CONTEXT, DeleteClip, ExportClip, JumpToEnd, JumpToIn, JumpToOut, JumpToStart,
     MarkIn, MarkOut, OpenFolder, Reload, ResetTrim, SeekBackward, SeekForward, SelectNextClip,
-    SelectPreviousClip, ShowShortcuts, StepBackward, StepForward, ToggleLoop, ToggleMute,
-    TogglePlay, ToggleTheme,
+    SelectPreviousClip, ShowShortcuts, SplitAtPlayhead, StepBackward, StepForward, ToggleLoop,
+    ToggleMute, TogglePlay, ToggleTheme,
     editor::Editor,
     frame_image,
     jobs::ExportJob,
@@ -471,6 +471,10 @@ impl PlicApp {
         self.add_segment(window, cx);
     }
 
+    fn split_action(&mut self, _: &SplitAtPlayhead, window: &mut Window, cx: &mut Context<Self>) {
+        self.split_at_playhead(window, cx);
+    }
+
     fn reset_trim(&mut self, _: &ResetTrim, _: &mut Window, cx: &mut Context<Self>) {
         self.player.update(cx, |player, cx| player.reset_trim(cx));
     }
@@ -761,6 +765,7 @@ impl Render for PlicApp {
             .on_action(cx.listener(Self::mark_out))
             .on_action(cx.listener(Self::reset_trim))
             .on_action(cx.listener(Self::add_segment_action))
+            .on_action(cx.listener(Self::split_action))
             .on_action(cx.listener(Self::toggle_loop))
             .on_action(cx.listener(Self::jump_to_in))
             .on_action(cx.listener(Self::jump_to_out))

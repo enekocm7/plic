@@ -4,7 +4,8 @@
 //! The text fields and the timeline edit the same range, the clip's active
 //! segment. Typing a valid time moves the handles; dragging a handle
 //! rewrites the text. With several segments, a list picks the active one and
-//! a switch decides whether they are joined or saved as separate files.
+//! a switch decides whether they are joined or saved as separate files, in
+//! which case each part can be given its own name.
 
 use std::{
     collections::HashMap,
@@ -26,13 +27,13 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use super::AddSegment;
 use super::app::{ClipEntry, ClipStatus, PlicApp, display_name};
 use super::library_panel::format_size;
+use super::{AddSegment, SplitAtPlayhead};
 use crate::{
     ffmpeg::{self, ExportMode},
     library, timestamp,
-    trim::TrimRange,
+    trim::{self, TrimRange},
 };
 
 pub const PANEL_WIDTH: f32 = 320.;
@@ -66,6 +67,8 @@ enum TimeField {
 /// are swapped whenever the selection changes.
 pub struct Editor {
     name: Entity<InputState>,
+    /// Name of the active segment when segments are saved separately.
+    part_name: Entity<InputState>,
     start: Entity<InputState>,
     end: Entity<InputState>,
     folder: Entity<SelectState<FolderList>>,
@@ -88,6 +91,7 @@ pub struct Editor {
 impl Editor {
     pub fn new(window: &mut Window, cx: &mut Context<PlicApp>) -> Self {
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("Clip name"));
+        let part_name = cx.new(|cx| InputState::new(window, cx));
         let start = cx.new(|cx| InputState::new(window, cx).placeholder("0:00"));
         let end = cx.new(|cx| InputState::new(window, cx).placeholder("End of video"));
         // Typing while the list is open filters the folders.
@@ -103,6 +107,7 @@ impl Editor {
 
         let subscriptions = vec![
             cx.subscribe_in(&name, window, PlicApp::on_name_event),
+            cx.subscribe_in(&part_name, window, PlicApp::on_part_name_event),
             cx.subscribe_in(&start, window, |this, _, event, window, cx| {
                 this.on_time_event(TimeField::Start, event, window, cx)
             }),
@@ -114,6 +119,7 @@ impl Editor {
 
         Self {
             name,
+            part_name,
             start,
             end,
             folder,
@@ -155,8 +161,26 @@ impl PlicApp {
         });
     }
 
-    /// Rewrites the start and end fields from the selected clip's range.
+    /// Rewrites the start, end and part name fields from the selected
+    /// clip's active segment.
     pub(super) fn sync_time_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (part_name, placeholder) = self
+            .current()
+            .map(|entry| {
+                let segments = &entry.segments;
+                let position = segments.position(segments.active_index());
+                (
+                    segments.active_name().to_owned(),
+                    trim::default_part_name(&entry.name, position),
+                )
+            })
+            .unwrap_or_default();
+        self.editor.part_name.update(cx, |input, cx| {
+            input.set_placeholder(placeholder, window, cx);
+            if input.value() != part_name {
+                input.set_value(part_name, window, cx);
+            }
+        });
         let trim = self.current().map(|entry| entry.trim()).unwrap_or_default();
         let start = timestamp::format(trim.start);
         let end = trim.end.map(timestamp::format).unwrap_or_default();
@@ -191,13 +215,52 @@ impl PlicApp {
         match event {
             InputEvent::Change => {
                 let name = input.read(cx).value().to_string();
-                if let Some(entry) = self.current_mut() {
-                    entry.name = name;
-                }
+                let Some(entry) = self.current_mut() else {
+                    return;
+                };
+                entry.name = name;
+                // Unnamed parts are called after the clip.
+                let segments = &entry.segments;
+                let placeholder = trim::default_part_name(
+                    &entry.name,
+                    segments.position(segments.active_index()),
+                );
+                self.editor.part_name.update(cx, |input, cx| {
+                    input.set_placeholder(placeholder, window, cx)
+                });
                 self.editor.export_error = None;
                 cx.notify();
             }
             // Ctrl+Enter arrives here too, but the ExportClip binding handles it.
+            InputEvent::PressEnter {
+                secondary: false, ..
+            } => self.export_current(window, cx),
+            _ => {}
+        }
+    }
+
+    fn on_part_name_event(
+        &mut self,
+        input: &Entity<InputState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            InputEvent::Change => {
+                let name = input.read(cx).value().to_string();
+                let Some(entry) = self.current_mut() else {
+                    return;
+                };
+                if entry.segments.active_name() == name {
+                    return;
+                }
+                entry.segments.set_active_name(name.clone());
+                self.player
+                    .update(cx, |player, _| player.set_segment_name(name));
+                self.editor.export_error = None;
+                cx.notify();
+            }
             InputEvent::PressEnter {
                 secondary: false, ..
             } => self.export_current(window, cx),
@@ -488,6 +551,21 @@ impl PlicApp {
         }
     }
 
+    pub(super) fn split_at_playhead(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let split = self
+            .player
+            .update(cx, |player, cx| player.split_at_playhead(cx));
+        if split {
+            self.sync_time_fields(window, cx);
+        } else if self.current().is_some() {
+            window.push_notification(
+                Notification::warning("Move the playhead inside a segment, away from its ends.")
+                    .title("Nothing to split"),
+                cx,
+            );
+        }
+    }
+
     fn select_segment(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.player
             .update(cx, |player, cx| player.select_segment(index, window, cx));
@@ -516,6 +594,8 @@ impl PlicApp {
         let duration = entry.info().and_then(|info| info.duration);
         let active = segments.active_index();
         let multiple = segments.len() > 1;
+        let separate = multiple && !self.editor.join;
+        let parts = separate.then(|| segments.named_parts(&entry.name));
         let rows = segments
             .ranges()
             .iter()
@@ -525,6 +605,9 @@ impl PlicApp {
                     .resolved_end(duration)
                     .map_or("end".to_string(), timestamp::format);
                 let is_active = index == active;
+                let part = parts
+                    .as_ref()
+                    .map(|parts| parts[segments.position(index)].0.clone());
                 h_flex()
                     .id(("segment", index))
                     .h(px(28.))
@@ -548,10 +631,23 @@ impl PlicApp {
                     .child(
                         div()
                             .flex_1()
+                            .min_w_0()
                             .font_family(theme.mono_font_family.clone())
                             .text_xs()
                             .child(format!("{} – {end}", timestamp::format(range.start))),
                     )
+                    .when_some(part, |row, part| {
+                        row.child(
+                            div()
+                                .flex_shrink(1.)
+                                .min_w_0()
+                                .max_w(px(120.))
+                                .truncate()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(part),
+                        )
+                    })
                     .child(
                         Button::new(("remove-segment", index))
                             .ghost()
@@ -573,14 +669,40 @@ impl PlicApp {
             .gap_1()
             .when(multiple, |list| list.children(rows))
             .child(
-                Button::new("add-segment")
-                    .ghost()
-                    .small()
-                    .w_full()
-                    .icon(IconName::Plus)
-                    .label("Add segment at the playhead")
-                    .tooltip_with_action("Add a segment", &AddSegment, Some(super::CONTEXT))
-                    .on_click(cx.listener(|this, _, window, cx| this.add_segment(window, cx))),
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Button::new("add-segment")
+                            .ghost()
+                            .small()
+                            .flex_1()
+                            .icon(IconName::Plus)
+                            .label("Add segment")
+                            .tooltip_with_action(
+                                "Start a segment at the playhead",
+                                &AddSegment,
+                                Some(super::CONTEXT),
+                            )
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.add_segment(window, cx)),
+                            ),
+                    )
+                    .child(
+                        Button::new("split-segment")
+                            .ghost()
+                            .small()
+                            .flex_1()
+                            .icon(IconName::Scissors)
+                            .label("Split")
+                            .tooltip_with_action(
+                                "Split the segment at the playhead",
+                                &SplitAtPlayhead,
+                                Some(super::CONTEXT),
+                            )
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.split_at_playhead(window, cx)
+                            })),
+                    ),
             )
             .when(multiple, |list| {
                 list.child(
@@ -605,6 +727,28 @@ impl PlicApp {
                                 .on_click(cx.listener(|this, checked: &bool, _, cx| {
                                     this.set_join(*checked, cx)
                                 })),
+                        ),
+                )
+            })
+            .when(separate, |list| {
+                list.child(
+                    v_flex()
+                        .pt_1()
+                        .gap_1p5()
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.muted_foreground)
+                                .child("Name of the selected part"),
+                        )
+                        .child(
+                            Input::new(&self.editor.part_name).small().suffix(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(".mp4"),
+                            ),
                         ),
                 )
             })
@@ -794,7 +938,7 @@ impl PlicApp {
         let separate = segment_count > 1 && !self.editor.join;
         let output_preview = match (&destination, output_name.is_empty()) {
             (Some(folder), false) if separate => Some(format!(
-                "{folder}{}{output_name}-1.mp4 … -{segment_count}.mp4",
+                "{folder}{}{segment_count} files",
                 std::path::MAIN_SEPARATOR
             )),
             (Some(folder), false) => Some(format!(

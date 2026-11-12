@@ -57,10 +57,13 @@ impl TrimRange {
 
 /// The ranges marked on one clip. There is always at least one; the
 /// active one is the range the handles, the time fields and the in/out
-/// shortcuts edit.
+/// shortcuts edit. Each segment can carry its own name, used when the
+/// segments are saved as separate files.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Segments {
     ranges: Vec<TrimRange>,
+    /// Parallel to `ranges`; empty means "use the default part name".
+    names: Vec<String>,
     active: usize,
 }
 
@@ -68,6 +71,7 @@ impl Default for Segments {
     fn default() -> Self {
         Self {
             ranges: vec![TrimRange::default()],
+            names: vec![String::new()],
             active: 0,
         }
     }
@@ -92,6 +96,40 @@ impl Segments {
 
     pub fn set_active(&mut self, range: TrimRange) {
         self.ranges[self.active] = range;
+    }
+
+    /// The name given to the active segment, empty if none.
+    pub fn active_name(&self) -> &str {
+        &self.names[self.active]
+    }
+
+    pub fn set_active_name(&mut self, name: String) {
+        self.names[self.active] = name;
+    }
+
+    /// Splits the segment under `at` in two, the active one if it covers
+    /// `at`. The second half becomes active and starts with no name. Both
+    /// halves must be at least [`MIN_LENGTH`] long.
+    pub fn split(&mut self, at: Duration, source_duration: Option<Duration>) -> bool {
+        let covers = |range: &TrimRange| {
+            at >= range.start + MIN_LENGTH
+                && range
+                    .resolved_end(source_duration)
+                    .is_none_or(|end| at + MIN_LENGTH <= end)
+        };
+        let index = if covers(&self.ranges[self.active]) {
+            self.active
+        } else if let Some(index) = self.ranges.iter().position(covers) {
+            index
+        } else {
+            return false;
+        };
+        let range = self.ranges[index];
+        self.ranges[index] = TrimRange::new(range.start, Some(at));
+        self.ranges.insert(index + 1, TrimRange::new(at, range.end));
+        self.names.insert(index + 1, String::new());
+        self.active = index + 1;
+        true
     }
 
     /// Makes another segment the one being edited.
@@ -119,6 +157,7 @@ impl Segments {
             .filter(|start| *start >= at + MIN_LENGTH)
             .min();
         self.ranges.push(TrimRange::new(at, end));
+        self.names.push(String::new());
         self.active = self.ranges.len() - 1;
         true
     }
@@ -129,6 +168,7 @@ impl Segments {
             return false;
         }
         self.ranges.remove(index);
+        self.names.remove(index);
         if self.active > index || self.active == self.ranges.len() {
             self.active -= 1;
         }
@@ -138,9 +178,42 @@ impl Segments {
     /// The segments in the order they appear in the video, which is the
     /// order they are exported and joined in.
     pub fn in_order(&self) -> Vec<TrimRange> {
-        let mut ranges = self.ranges.clone();
-        ranges.sort_by_key(|range| range.start);
-        ranges
+        self.order()
+            .into_iter()
+            .map(|index| self.ranges[index])
+            .collect()
+    }
+
+    /// The segments in video order with the file name each is saved under
+    /// as a separate part: its own name, or `base-N` by position.
+    pub fn named_parts(&self, base: &str) -> Vec<(String, TrimRange)> {
+        self.order()
+            .into_iter()
+            .enumerate()
+            .map(|(position, index)| {
+                let name = self.names[index].trim();
+                let name = if name.is_empty() {
+                    default_part_name(base, position)
+                } else {
+                    name.to_owned()
+                };
+                (name, self.ranges[index])
+            })
+            .collect()
+    }
+
+    /// Where segment `index` falls in video order, counting from zero.
+    pub fn position(&self, index: usize) -> usize {
+        self.order()
+            .iter()
+            .position(|&other| other == index)
+            .unwrap_or(index)
+    }
+
+    fn order(&self) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..self.ranges.len()).collect();
+        order.sort_by_key(|&index| self.ranges[index].start);
+        order
     }
 
     /// Combined length of every segment, if it can be known.
@@ -164,6 +237,11 @@ impl Segments {
         }
         Ok(())
     }
+}
+
+/// `name-1`, `name-2`, …: the default file name of a separate part.
+pub fn default_part_name(base: &str, position: usize) -> String {
+    format!("{base}-{}", position + 1)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,6 +315,38 @@ mod tests {
         assert_eq!(segments.active(), TrimRange::new(s(2), Some(s(10))));
         // The last segment stays.
         assert!(!segments.remove(0));
+    }
+
+    #[test]
+    fn split_cuts_the_segment_under_the_playhead() {
+        let mut segments = Segments::default();
+        assert!(segments.split(s(20), Some(s(60))));
+        assert!(segments.split(s(40), Some(s(60))));
+        assert_eq!(
+            segments.ranges(),
+            &[
+                TrimRange::new(s(0), Some(s(20))),
+                TrimRange::new(s(20), Some(s(40))),
+                TrimRange::new(s(40), None),
+            ]
+        );
+        assert_eq!(segments.active_index(), 2);
+        // Too close to a cut, or to the end.
+        assert!(!segments.split(s(40), Some(s(60))));
+        assert!(!segments.split(s(60), Some(s(60))));
+
+        segments.set_active_name("finale".into());
+        assert_eq!(
+            segments.named_parts("match"),
+            vec![
+                ("match-1".to_string(), TrimRange::new(s(0), Some(s(20)))),
+                ("match-2".to_string(), TrimRange::new(s(20), Some(s(40)))),
+                ("finale".to_string(), TrimRange::new(s(40), None)),
+            ]
+        );
+        assert!(segments.remove(0));
+        assert_eq!(segments.active_name(), "finale");
+        assert_eq!(segments.position(segments.active_index()), 1);
     }
 
     #[test]

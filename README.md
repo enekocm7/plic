@@ -31,9 +31,11 @@ Without a folder argument, plic opens the current directory.
 
 To keep several parts of one recording, press `N` (or **Add segment at the
 playhead**) to start another segment, and trim it like the first. Click a
-segment on the timeline or in the export panel to edit it. Segments are
+segment on the timeline or in the export panel to edit it. Press `S` to
+split the segment under the playhead in two, which cuts a long recording
+into parts in a single pass. Segments are
 joined in order into one file, or, with **Join into one file** off, saved
-as `name-1`, `name-2`, … The original is only moved to `edited/` once every
+as `name-1`, `name-2`, … or under a name given to each part The original is only moved to `edited/` once every
 part has exported.
 
 Turn on **Lossless** in the export panel to copy the video instead of
