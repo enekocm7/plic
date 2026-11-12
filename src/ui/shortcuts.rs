@@ -52,6 +52,8 @@ const GROUPS: &[Group] = &[
                 "Save the frame as PNG or JPEG",
             ),
             (&["delete"], "Delete"),
+            (&["ctrl-z"], "Undo a trim, delete or archive move"),
+            (&["ctrl-y", "ctrl-shift-z"], "Redo"),
             (&["ctrl-o"], "Open a folder"),
             (&["f5"], "Rescan the folder"),
             (&["ctrl-t"], "Light or dark theme"),

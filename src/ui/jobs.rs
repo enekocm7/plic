@@ -367,6 +367,10 @@ impl PlicApp {
                             )
                         });
                         window.push_notification(Notification::success(message).title(title), cx);
+                        this.history.record(super::history::Change::Archive {
+                            original: source.clone(),
+                            archived: archived.clone(),
+                        });
                         if let Some(index) = index {
                             let entry = this.take_clip(index, window, cx);
                             this.settle(entry, archived);

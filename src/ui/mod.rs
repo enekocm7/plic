@@ -5,6 +5,7 @@ mod clip_actions;
 mod clip_filter;
 mod editor;
 mod frame_image;
+mod history;
 mod jobs;
 mod library_panel;
 mod player;
@@ -62,6 +63,8 @@ actions!(
         ToggleTheme,
         ShowShortcuts,
         ShowSettings,
+        Undo,
+        Redo,
         Quit,
     ]
 );
@@ -102,6 +105,10 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("f11", ToggleFullscreen, Some(CONTEXT)),
         KeyBinding::new("f1", ShowShortcuts, Some(CONTEXT)),
         KeyBinding::new("ctrl-,", ShowSettings, Some(CONTEXT)),
+        // Text fields keep their own undo.
+        KeyBinding::new("ctrl-z", Undo, shortcuts),
+        KeyBinding::new("ctrl-shift-z", Redo, shortcuts),
+        KeyBinding::new("ctrl-y", Redo, shortcuts),
         // Works from inside the editor's text fields too.
         KeyBinding::new("ctrl-enter", ExportClip, Some(CONTEXT)),
         KeyBinding::new("ctrl-shift-s", SaveFrame, Some(CONTEXT)),

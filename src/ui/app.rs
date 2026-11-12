@@ -11,7 +11,8 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _, DropdownButton};
 use gpui_kit::component::menu::PopupMenuItem;
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, Sizable as _, Theme, ThemeMode, TitleBar, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, Sizable as _, Theme, ThemeMode, TitleBar, h_flex,
+    v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -19,12 +20,14 @@ use gpui_kit::*;
 use super::{
     AddSegment, CONTEXT, CopyLastExport, DeleteClip, ExitFullscreen, ExportClip, JumpToEnd,
     JumpToIn, JumpToOut, JumpToStart, MarkIn, MarkOut, NextMarker, OpenFolder, PreviousMarker,
-    Reload, ResetTrim, SaveFrame, SaveFrameJpeg, SeekBackward, SeekForward, SelectNextClip,
+    Redo, Reload, ResetTrim, SaveFrame, SaveFrameJpeg, SeekBackward, SeekForward, SelectNextClip,
     SelectPreviousClip, ShowSettings, ShowShortcuts, SplitAtPlayhead, StepBackward, StepForward,
     ToggleFullscreen, ToggleLoop, ToggleMarker, ToggleMute, TogglePlay, ToggleTheme, TrimToMarkers,
+    Undo,
     clip_filter::ClipFilter,
     editor::Editor,
     frame_image,
+    history::History,
     jobs::{ExportJob, FinishedExport},
     player::{Player, PlayerEvent},
     shortcuts,
@@ -176,6 +179,8 @@ pub struct PlicApp {
     /// GitHub is asked on its own thread so a slow network never delays the
     /// UI.
     pub(super) updates_worker: WorkerPool,
+    /// Changes that can be undone and redone.
+    pub(super) history: History,
 }
 
 impl PlicApp {
@@ -221,6 +226,7 @@ impl PlicApp {
             update: None,
             checking_update: false,
             updates_worker: WorkerPool::new("update", 1),
+            history: History::default(),
         };
         if let Some(folder) = folder {
             app.load_folder(folder, window, cx);
@@ -233,7 +239,12 @@ impl PlicApp {
         app
     }
 
-    fn load_folder(&mut self, folder: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn load_folder(
+        &mut self,
+        folder: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.generation += 1;
         let old_entries = std::mem::take(&mut self.clips)
             .into_iter()
@@ -322,7 +333,7 @@ impl PlicApp {
 
     /// Merges a fresh scan into the lists: new recordings are added and
     /// vanished ones dropped, while every other clip keeps its draft.
-    fn refresh_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn refresh_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(folder) = self.folder.clone() else {
             return;
         };
@@ -903,10 +914,28 @@ impl PlicApp {
         if let Some(index) = self.index_of(first) {
             self.select(index, window, cx);
         } else if let Some(index) = self.settled_index_of(first) {
-            self.settled_open = true;
-            self.load_settled_details(cx);
-            self.select_settled(index, window, cx);
+            self.reveal_settled(index, window, cx);
         }
+    }
+
+    /// Opens the Settled list and selects one of its originals.
+    pub(super) fn reveal_settled(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.settled_open = true;
+        self.load_settled_details(cx);
+        self.select_settled(index, window, cx);
+    }
+
+    fn undo_action(&mut self, _: &Undo, window: &mut Window, cx: &mut Context<Self>) {
+        self.undo(window, cx);
+    }
+
+    fn redo_action(&mut self, _: &Redo, window: &mut Window, cx: &mut Context<Self>) {
+        self.redo(window, cx);
     }
 
     fn toggle_theme(&mut self, _: &ToggleTheme, window: &mut Window, cx: &mut Context<Self>) {
@@ -1040,6 +1069,34 @@ impl PlicApp {
                                     })
                                 })
                         })
+                        .child({
+                            let tooltip: SharedString = match self.history.next_undo() {
+                                Some(change) => format!("Undo {} (Ctrl+Z)", change.describe()),
+                                None => "Nothing to undo".into(),
+                            }
+                            .into();
+                            Button::new("undo")
+                                .ghost()
+                                .small()
+                                .icon(IconName::Undo2)
+                                .tooltip(tooltip)
+                                .disabled(self.history.next_undo().is_none())
+                                .on_click(cx.listener(|this, _, window, cx| this.undo(window, cx)))
+                        })
+                        .child({
+                            let tooltip: SharedString = match self.history.next_redo() {
+                                Some(change) => format!("Redo {} (Ctrl+Y)", change.describe()),
+                                None => "Nothing to redo".into(),
+                            }
+                            .into();
+                            Button::new("redo")
+                                .ghost()
+                                .small()
+                                .icon(IconName::Redo2)
+                                .tooltip(tooltip)
+                                .disabled(self.history.next_redo().is_none())
+                                .on_click(cx.listener(|this, _, window, cx| this.redo(window, cx)))
+                        })
                         .child(
                             Button::new("reload")
                                 .ghost()
@@ -1105,6 +1162,8 @@ impl Render for PlicApp {
         for image in self.stale_images.drain(..) {
             window.drop_image(image).ok();
         }
+        // Every trim edit ends in a render, so this sees them all.
+        self.watch_trim(cx);
         let theme = cx.theme();
         v_flex()
             .id("plic")
@@ -1147,6 +1206,8 @@ impl Render for PlicApp {
             .on_action(cx.listener(Self::delete_clip))
             .on_action(cx.listener(Self::show_shortcuts))
             .on_action(cx.listener(Self::show_settings))
+            .on_action(cx.listener(Self::undo_action))
+            .on_action(cx.listener(Self::redo_action))
             .on_drop(cx.listener(|this, dropped: &ExternalPaths, window, cx| {
                 this.handle_drop(dropped, window, cx)
             }))
