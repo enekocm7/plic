@@ -1,5 +1,6 @@
-//! Exporting a trimmed range of a clip with ffmpeg, either re-encoded for a
-//! frame-accurate cut or stream-copied for a fast, lossless one.
+//! Exporting trimmed ranges of a clip with ffmpeg, either re-encoded for a
+//! frame-accurate cut or stream-copied for a fast, lossless one. Several
+//! ranges are joined, in order, into one file.
 //!
 //! Output is written to a hidden temporary file next to the destination and
 //! only published once ffmpeg succeeds, so a crash or cancellation never
@@ -112,10 +113,13 @@ pub enum ExportMode {
 pub struct ExportRequest {
     pub source: PathBuf,
     pub output: PathBuf,
-    pub range: TrimRange,
+    /// The parts of the source to keep, joined in this order. Never empty.
+    pub ranges: Vec<TrimRange>,
     pub mode: ExportMode,
     /// Length of the source, used to report progress for open-ended ranges.
     pub source_duration: Option<Duration>,
+    /// Whether the source has sound; joining needs to know up front.
+    pub has_audio: bool,
 }
 
 /// Lets the UI cancel a running export.
@@ -176,22 +180,42 @@ pub fn export(
     if output.exists() {
         return Err(anyhow::anyhow!("{} already exists", output.display()).into());
     }
-    let range = effective_range(request)?;
-    let temporary = create_temp_path(output)?;
+    let ranges = effective_ranges(request)?;
+    let temporary = create_temp_path(output, "mp4")?;
     // Removes the temporary file on every early return below.
     let guard = TempFile(&temporary);
 
     let mut command = Command::new("ffmpeg");
     command.args(["-hide_banner", "-loglevel", "error", "-nostats", "-y"]);
-    if !range.start.is_zero() {
-        command.arg("-ss").arg(seconds_arg(range.start));
-    }
-    if request.mode == ExportMode::Reencode {
-        command.args(["-hwaccel", "auto"]);
-    }
-    command.arg("-i").arg(&request.source);
-    if let Some(length) = range.end.map(|end| end.saturating_sub(range.start)) {
-        command.arg("-t").arg(seconds_arg(length));
+    // Kept alive until ffmpeg is done with it.
+    let mut _concat_list = None;
+    match (request.mode, ranges.as_slice()) {
+        (_, [range]) => {
+            add_input(&mut command, request, *range);
+        }
+        (ExportMode::Reencode, _) => {
+            // One seeked input per range, joined by the concat filter: every
+            // cut stays frame-accurate and the joins are seamless.
+            for range in &ranges {
+                add_input(&mut command, request, *range);
+            }
+            command
+                .arg("-filter_complex")
+                .arg(concat_filter(ranges.len(), request.has_audio))
+                .args(["-map", "[v]"]);
+            if request.has_audio {
+                command.args(["-map", "[a]"]);
+            }
+        }
+        (ExportMode::StreamCopy, _) => {
+            let list = create_temp_path(output, "txt")?;
+            fs::write(&list, concat_list(&request.source, &ranges))
+                .with_context(|| format!("could not write {}", list.display()))?;
+            command
+                .args(["-f", "concat", "-safe", "0", "-i"])
+                .arg(&list);
+            _concat_list = Some(OwnedTempFile(list));
+        }
     }
     match request.mode {
         ExportMode::Reencode => {
@@ -217,7 +241,10 @@ pub fn export(
         .context("could not start ffmpeg; check that it is installed and on PATH")?;
     let stderr = drain_in_background(child.stderr.take());
 
-    let expected = range.length(request.source_duration);
+    let expected = ranges
+        .iter()
+        .map(|range| range.length(request.source_duration))
+        .sum::<Option<Duration>>();
     if let Some(stdout) = child.stdout.take() {
         for line in BufReader::new(stdout).lines() {
             if cancel.is_cancelled() {
@@ -252,19 +279,77 @@ pub fn export(
     Ok(output.clone())
 }
 
-/// The range that will actually be written. A stream copy can only start on
-/// a keyframe, so its start is moved back to the one at or before the
+/// The ranges that will actually be written. A stream copy can only start
+/// on a keyframe, so each start is moved back to the one at or before the
 /// requested start; starting there explicitly keeps every player in
 /// agreement about where the clip begins.
-fn effective_range(request: &ExportRequest) -> Result<TrimRange> {
+fn effective_ranges(request: &ExportRequest) -> Result<Vec<TrimRange>> {
+    if request.ranges.is_empty() {
+        bail!("nothing to export");
+    }
     match request.mode {
-        ExportMode::Reencode => Ok(request.range),
-        ExportMode::StreamCopy => {
-            let start = super::keyframe_at_or_before(&request.source, request.range.start)
-                .context("could not find a keyframe to start the lossless cut on")?;
-            Ok(TrimRange::new(start, request.range.end))
+        ExportMode::Reencode => Ok(request.ranges.clone()),
+        ExportMode::StreamCopy => request
+            .ranges
+            .iter()
+            .map(|range| {
+                let start = super::keyframe_at_or_before(&request.source, range.start)
+                    .context("could not find a keyframe to start the lossless cut on")?;
+                Ok(TrimRange::new(start, range.end))
+            })
+            .collect(),
+    }
+}
+
+/// Adds `request.source` as an input limited to `range`.
+fn add_input(command: &mut Command, request: &ExportRequest, range: TrimRange) {
+    if !range.start.is_zero() {
+        command.arg("-ss").arg(seconds_arg(range.start));
+    }
+    if let Some(length) = range.end.map(|end| end.saturating_sub(range.start)) {
+        command.arg("-t").arg(seconds_arg(length));
+    }
+    if request.mode == ExportMode::Reencode {
+        command.args(["-hwaccel", "auto"]);
+    }
+    command.arg("-i").arg(&request.source);
+}
+
+/// `[0:v:0][0:a:0][1:v:0][1:a:0]concat=n=2:v=1:a=1[v][a]`
+fn concat_filter(inputs: usize, has_audio: bool) -> String {
+    let mut filter = String::new();
+    for input in 0..inputs {
+        filter.push_str(&format!("[{input}:v:0]"));
+        if has_audio {
+            filter.push_str(&format!("[{input}:a:0]"));
         }
     }
+    filter.push_str(&format!(
+        "concat=n={inputs}:v=1:a={}[v]",
+        u8::from(has_audio)
+    ));
+    if has_audio {
+        filter.push_str("[a]");
+    }
+    filter
+}
+
+/// A concat demuxer script that plays `ranges` of `source` back to back.
+fn concat_list(source: &Path, ranges: &[TrimRange]) -> String {
+    // Paths are single-quoted; a quote inside one is closed, escaped and
+    // reopened.
+    let path = source.to_string_lossy().replace('\'', r"'\''");
+    let mut list = String::from("ffconcat version 1.0\n");
+    for range in ranges {
+        list.push_str(&format!("file '{path}'\n"));
+        if !range.start.is_zero() {
+            list.push_str(&format!("inpoint {}\n", seconds_arg(range.start)));
+        }
+        if let Some(end) = range.end {
+            list.push_str(&format!("outpoint {}\n", seconds_arg(end)));
+        }
+    }
+    list
 }
 
 /// Reads `out_time_us=…` lines from ffmpeg's `-progress` output.
@@ -296,20 +381,33 @@ struct TempFile<'a>(&'a Path);
 
 impl Drop for TempFile<'_> {
     fn drop(&mut self) {
-        // A killed ffmpeg can hold the file for a moment longer, especially
-        // behind a launcher shim, and Windows will not delete an open file.
-        for _ in 0..20 {
-            match fs::remove_file(self.0) {
-                Err(error) if error.kind() != io::ErrorKind::NotFound => {
-                    thread::sleep(Duration::from_millis(100));
-                }
-                _ => return,
+        remove_temporary(self.0);
+    }
+}
+
+/// A temporary file that is removed when dropped.
+struct OwnedTempFile(PathBuf);
+
+impl Drop for OwnedTempFile {
+    fn drop(&mut self) {
+        remove_temporary(&self.0);
+    }
+}
+
+fn remove_temporary(path: &Path) {
+    // A killed ffmpeg can hold the file for a moment longer, especially
+    // behind a launcher shim, and Windows will not delete an open file.
+    for _ in 0..20 {
+        match fs::remove_file(path) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                thread::sleep(Duration::from_millis(100));
             }
+            _ => return,
         }
     }
 }
 
-fn create_temp_path(output: &Path) -> Result<PathBuf> {
+fn create_temp_path(output: &Path, extension: &str) -> Result<PathBuf> {
     let parent = output.parent().unwrap_or_else(|| Path::new("."));
     let stem = output
         .file_stem()
@@ -317,7 +415,10 @@ fn create_temp_path(output: &Path) -> Result<PathBuf> {
         .unwrap_or_default();
     for _ in 0..100 {
         let id = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
-        let candidate = parent.join(format!(".{stem}.plic-{}-{id}.mp4", std::process::id()));
+        let candidate = parent.join(format!(
+            ".{stem}.plic-{}-{id}.{extension}",
+            std::process::id()
+        ));
         match OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -391,6 +492,36 @@ mod tests {
         );
         assert_eq!(estimated_size(60 * mb, minute, minute * 2), 60 * mb);
         assert_eq!(estimated_size(60 * mb, Duration::ZERO, minute), 0);
+    }
+
+    #[test]
+    fn builds_the_concat_filter() {
+        assert_eq!(
+            concat_filter(2, true),
+            "[0:v:0][0:a:0][1:v:0][1:a:0]concat=n=2:v=1:a=1[v][a]"
+        );
+        assert_eq!(
+            concat_filter(3, false),
+            "[0:v:0][1:v:0][2:v:0]concat=n=3:v=1:a=0[v]"
+        );
+    }
+
+    #[test]
+    fn writes_a_concat_list_with_quoted_paths() {
+        let s = Duration::from_secs;
+        let list = concat_list(
+            Path::new("C:/clips/it's.mp4"),
+            &[
+                TrimRange::new(s(0), Some(s(5))),
+                TrimRange::new(s(10), None),
+            ],
+        );
+        assert_eq!(
+            list,
+            "ffconcat version 1.0\n\
+             file 'C:/clips/it'\\''s.mp4'\noutpoint 5.000\n\
+             file 'C:/clips/it'\\''s.mp4'\ninpoint 10.000\n"
+        );
     }
 
     #[test]

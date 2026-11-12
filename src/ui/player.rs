@@ -26,7 +26,7 @@ use crate::{
     ffmpeg::{self, FrameSize, MediaInfo},
     playback::{MAX_FRAME_RATE, Playback},
     timestamp,
-    trim::{self, TrimRange},
+    trim::{self, Segments, TrimRange},
     worker::WorkerPool,
 };
 
@@ -41,9 +41,9 @@ const RESIZE_SETTLE: Duration = Duration::from_millis(250);
 const FILMSTRIP_TILES: usize = 12;
 const FILMSTRIP_TILE_SIZE: FrameSize = FrameSize::new(192, 108);
 
-/// Emitted when the user changes the trim range from the viewer.
+/// Emitted when the user changes the segments from the viewer.
 pub enum PlayerEvent {
-    TrimChanged(TrimRange),
+    SegmentsChanged(Segments),
 }
 
 impl EventEmitter<PlayerEvent> for Player {}
@@ -111,7 +111,7 @@ pub struct Player {
     resume_after_drag: bool,
     drag: Option<Drag>,
     error: Option<SharedString>,
-    trim: TrimRange,
+    segments: Segments,
     /// False for clips that are only viewed, such as exported originals.
     trimmable: bool,
     looping: bool,
@@ -142,7 +142,7 @@ impl Player {
             resume_after_drag: false,
             drag: None,
             error: None,
-            trim: TrimRange::default(),
+            segments: Segments::default(),
             trimmable: true,
             looping: false,
             filmstrip: Vec::new(),
@@ -154,12 +154,12 @@ impl Player {
         }
     }
 
-    /// Loads a clip and shows the first frame of its trim range.
+    /// Loads a clip and shows the first frame of its active segment.
     pub fn load(
         &mut self,
         path: PathBuf,
         info: MediaInfo,
-        trim: TrimRange,
+        segments: Segments,
         cx: &mut Context<Self>,
     ) {
         if self
@@ -171,9 +171,10 @@ impl Player {
         }
         self.unload();
         self.source = Some(Source { path, info });
-        self.trim = trim;
-        self.position = trim.start;
-        self.request_still(trim.start, cx);
+        let start = segments.active().start;
+        self.segments = segments;
+        self.position = start;
+        self.request_still(start, cx);
         self.request_filmstrip(cx);
         cx.notify();
     }
@@ -200,7 +201,7 @@ impl Player {
         self.error = None;
         self.drag = None;
         self.resume_after_drag = false;
-        self.trim = TrimRange::default();
+        self.segments = Segments::default();
         self.stale_frames.extend(self.frame.take());
         self.stale_frames.extend(self.filmstrip.drain(..).flatten());
     }
@@ -246,9 +247,9 @@ impl Player {
             let near_end = |end: Duration| from + source.info.frame_interval() >= end;
             if self.looping {
                 // Looping plays the selection, so start inside it.
-                let end = self.trim.resolved_end(source.info.duration);
-                if from < self.trim.start || end.is_some_and(near_end) {
-                    from = self.trim.start;
+                let end = self.trim().resolved_end(source.info.duration);
+                if from < self.trim().start || end.is_some_and(near_end) {
+                    from = self.trim().start;
                 }
             } else if source.info.duration.is_some_and(near_end) {
                 // Pressing play at the end starts over.
@@ -374,20 +375,69 @@ impl Player {
         }
     }
 
-    /// Replaces the trim range, e.g. after it was typed into the editor.
+    /// The segment being edited.
+    fn trim(&self) -> TrimRange {
+        self.segments.active()
+    }
+
+    /// Replaces the active segment's range, e.g. after it was typed into
+    /// the editor.
     pub fn set_trim(&mut self, trim: TrimRange, cx: &mut Context<Self>) {
-        if self.trim != trim {
-            self.trim = trim;
+        if self.trim() != trim {
+            self.segments.set_active(trim);
             cx.notify();
         }
     }
 
     fn change_trim(&mut self, trim: TrimRange, cx: &mut Context<Self>) {
-        if self.trimmable && self.trim != trim {
-            self.trim = trim;
-            cx.emit(PlayerEvent::TrimChanged(trim));
-            cx.notify();
+        if self.trim() != trim {
+            self.change_segments(
+                |segments| {
+                    segments.set_active(trim);
+                    true
+                },
+                cx,
+            );
         }
+    }
+
+    /// Applies an edit to the segments and reports it, if the clip can be
+    /// trimmed and the edit did anything.
+    fn change_segments(
+        &mut self,
+        edit: impl FnOnce(&mut Segments) -> bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.trimmable || self.source.is_none() || !edit(&mut self.segments) {
+            return false;
+        }
+        cx.emit(PlayerEvent::SegmentsChanged(self.segments.clone()));
+        cx.notify();
+        true
+    }
+
+    /// Starts a new segment at the playhead.
+    pub fn add_segment(&mut self, cx: &mut Context<Self>) -> bool {
+        let (at, duration) = (self.position(), self.duration());
+        self.change_segments(|segments| segments.add(at, duration), cx)
+    }
+
+    pub fn remove_segment(&mut self, index: usize, cx: &mut Context<Self>) -> bool {
+        self.change_segments(|segments| segments.remove(index), cx)
+    }
+
+    /// Makes another segment the one being edited and shows its start.
+    pub fn select_segment(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let selected = self.change_segments(|segments| segments.select(index), cx);
+        if selected && self.drag.is_none() {
+            self.seek(self.trim().start, window, cx);
+        }
+        selected
     }
 
     /// Starts the exported range at the playhead.
@@ -397,7 +447,10 @@ impl Player {
         }
         let start = self.position();
         // An in point past the out point keeps the start and drops the end.
-        let end = self.trim.end.filter(|end| *end >= start + trim::MIN_LENGTH);
+        let end = self
+            .trim()
+            .end
+            .filter(|end| *end >= start + trim::MIN_LENGTH);
         self.change_trim(TrimRange::new(start, end), cx);
     }
 
@@ -408,8 +461,8 @@ impl Player {
         }
         let end = self.position();
         // An out point before the in point keeps the end and drops the start.
-        let start = if end >= self.trim.start + trim::MIN_LENGTH {
-            self.trim.start
+        let start = if end >= self.trim().start + trim::MIN_LENGTH {
+            self.trim().start
         } else {
             Duration::ZERO
         };
@@ -426,11 +479,11 @@ impl Player {
     }
 
     pub fn jump_to_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.seek(self.trim.start, window, cx);
+        self.seek(self.trim().start, window, cx);
     }
 
     pub fn jump_to_out(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(end) = self.trim.resolved_end(self.duration()) {
+        if let Some(end) = self.trim().resolved_end(self.duration()) {
             self.seek(end, window, cx);
         }
     }
@@ -455,23 +508,23 @@ impl Player {
             Drag::Playhead => {}
             Drag::TrimStart => {
                 let limit = self
-                    .trim
+                    .trim()
                     .resolved_end(Some(duration))
                     .unwrap_or(duration)
                     .saturating_sub(trim::MIN_LENGTH);
-                self.change_trim(TrimRange::new(time.min(limit), self.trim.end), cx);
+                self.change_trim(TrimRange::new(time.min(limit), self.trim().end), cx);
             }
             Drag::TrimEnd => {
-                let end = time.max(self.trim.start + trim::MIN_LENGTH).min(duration);
+                let end = time.max(self.trim().start + trim::MIN_LENGTH).min(duration);
                 // Dragging to the very end means "until the end of the video".
                 let end = (end + self.frame_interval() < duration).then_some(end);
-                self.change_trim(TrimRange::new(self.trim.start, end), cx);
+                self.change_trim(TrimRange::new(self.trim().start, end), cx);
             }
         }
         let preview = match drag {
             Drag::Playhead => time,
-            Drag::TrimStart => self.trim.start,
-            Drag::TrimEnd => self.trim.resolved_end(Some(duration)).unwrap_or(time),
+            Drag::TrimStart => self.trim().start,
+            Drag::TrimEnd => self.trim().resolved_end(Some(duration)).unwrap_or(time),
         };
         self.seek(preview, window, cx);
     }
@@ -490,7 +543,7 @@ impl Player {
         TimelineState {
             duration: self.duration(),
             position: self.position(),
-            trim: self.trimmable.then_some(self.trim),
+            segments: self.trimmable.then(|| self.segments.clone()),
             filmstrip: self.filmstrip.clone(),
             drag: self.drag,
             aspect_ratio: self
@@ -631,9 +684,9 @@ impl Player {
 
         let finished = self.playback.as_ref().is_some_and(Playback::is_finished);
         if self.looping {
-            let end = self.trim.resolved_end(self.duration());
+            let end = self.trim().resolved_end(self.duration());
             if finished || end.is_some_and(|end| self.position() >= end) {
-                self.seek(self.trim.start, window, cx);
+                self.seek(self.trim().start, window, cx);
                 return;
             }
         }

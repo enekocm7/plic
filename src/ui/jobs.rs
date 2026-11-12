@@ -1,6 +1,9 @@
 //! The export queue. Exports run one at a time in the background so a
 //! hardware encoder is never asked for more sessions than it has; the user
 //! moves on to the next clip as soon as one is queued.
+//!
+//! A clip whose segments are saved as separate files queues one job per
+//! segment. Its original is only archived once every one of them succeeded.
 
 use std::path::{Path, PathBuf};
 
@@ -21,6 +24,8 @@ use crate::{
 
 pub struct ExportJob {
     id: u64,
+    /// Shared by the jobs queued for one clip in one go.
+    batch: u64,
     request: ExportRequest,
     label: SharedString,
     cancel: CancelToken,
@@ -41,8 +46,8 @@ impl ExportJob {
 impl PlicApp {
     /// Validates the selected clip's draft and queues its export.
     pub(super) fn export_current(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let request = match self.export_request(cx) {
-            Ok(request) => request,
+        let requests = match self.export_requests(cx) {
+            Ok(requests) => requests,
             Err(error) => {
                 self.editor.export_error = Some(error);
                 cx.notify();
@@ -50,17 +55,22 @@ impl PlicApp {
             }
         };
         self.editor.export_error = None;
-        let index = self.selected.expect("export_request needs a selection");
+        let index = self.selected.expect("export_requests needs a selection");
         self.clips[index].status = ClipStatus::Exporting;
 
         self.next_job_id += 1;
-        self.jobs.push(ExportJob {
-            id: self.next_job_id,
-            label: library::display_name(&request.output).into(),
-            request,
-            cancel: CancelToken::default(),
-            progress: None,
-        });
+        let batch = self.next_job_id;
+        for request in requests {
+            self.next_job_id += 1;
+            self.jobs.push(ExportJob {
+                id: self.next_job_id,
+                batch,
+                label: library::display_name(&request.output).into(),
+                request,
+                cancel: CancelToken::default(),
+                progress: None,
+            });
+        }
         self.start_next_job(window, cx);
 
         // Keep going with whatever still needs editing.
@@ -70,7 +80,9 @@ impl PlicApp {
         cx.notify();
     }
 
-    fn export_request(&self, cx: &App) -> Result<ExportRequest, SharedString> {
+    /// One request for the whole clip, or one per segment when they are
+    /// saved as separate files.
+    fn export_requests(&self, cx: &App) -> Result<Vec<ExportRequest>, SharedString> {
         let entry = self.current().ok_or("Select a clip to export")?;
         if entry.status == ClipStatus::Exporting {
             return Err("This clip is already being exported".into());
@@ -78,30 +90,45 @@ impl PlicApp {
         let info = entry.info().ok_or("This clip has not been read yet")?;
         let name = self.editor.name(cx);
         library::validate_file_stem(&name).map_err(|error| error.to_string())?;
-        entry
-            .trim
-            .validate(info.duration)
-            .map_err(|error| error.to_string())?;
+        entry.segments.validate(info.duration)?;
         let folder = self
             .destination(entry)
             .ok_or("Create a destination folder first")?;
 
-        let output = folder.join(format!("{name}.mp4"));
-        let taken = output.exists() || self.jobs.iter().any(|job| job.request.output == output);
-        if taken {
-            return Err(format!(
-                "{} already has a clip called {name}",
-                library::display_name(folder)
-            )
-            .into());
-        }
-        Ok(ExportRequest {
-            source: entry.file.path.clone(),
-            output,
-            range: entry.trim,
-            mode: self.editor.mode,
-            source_duration: info.duration,
-        })
+        let ranges = entry.segments.in_order();
+        let parts: Vec<(String, Vec<_>)> = if ranges.len() == 1 || self.editor.join {
+            vec![(name, ranges)]
+        } else {
+            ranges
+                .into_iter()
+                .enumerate()
+                .map(|(index, range)| (part_name(&name, index), vec![range]))
+                .collect()
+        };
+
+        parts
+            .into_iter()
+            .map(|(name, ranges)| {
+                let output = folder.join(format!("{name}.mp4"));
+                let taken =
+                    output.exists() || self.jobs.iter().any(|job| job.request.output == output);
+                if taken {
+                    return Err(format!(
+                        "{} already has a clip called {name}",
+                        library::display_name(folder)
+                    )
+                    .into());
+                }
+                Ok(ExportRequest {
+                    source: entry.file.path.clone(),
+                    output,
+                    ranges,
+                    mode: self.editor.mode,
+                    source_duration: info.duration,
+                    has_audio: info.has_audio,
+                })
+            })
+            .collect()
     }
 
     fn next_pending_after(&self, index: usize) -> Option<usize> {
@@ -165,30 +192,53 @@ impl PlicApp {
         };
         let job = self.jobs.remove(position);
         let index = self.index_of(&job.request.source);
+        let batch_done = !self.jobs.iter().any(|other| other.batch == job.batch);
+        let succeeded = result.is_ok();
+        let batch_failed = if batch_done {
+            self.failed_batches.remove(&job.batch)
+        } else {
+            self.failed_batches.contains(&job.batch)
+        };
 
         match result {
-            Ok(output) => self.archive_exported(job, output, window, cx),
-            Err(ExportError::Cancelled) => {
+            Ok(output) if batch_done && !batch_failed => {
+                self.archive_exported(job, output, window, cx)
+            }
+            Ok(output) => {
+                let folder = output.parent().map(library::display_name);
                 window.push_notification(
-                    Notification::info(format!("{} was not exported", job.label))
-                        .title("Export cancelled"),
+                    Notification::success(
+                        folder.map_or_else(String::new, |folder| format!("Saved to {folder}")),
+                    )
+                    .title(format!("Exported {}", job.label)),
                     cx,
                 );
-                if let Some(index) = index {
-                    self.clips[index].status = ClipStatus::Pending;
+            }
+            Err(error) => {
+                if !batch_done {
+                    self.failed_batches.insert(job.batch);
+                }
+                match error {
+                    ExportError::Cancelled => window.push_notification(
+                        Notification::info(format!("{} was not exported", job.label))
+                            .title("Export cancelled"),
+                        cx,
+                    ),
+                    ExportError::Failed(error) => window.push_notification(
+                        Notification::error(format!("{error:#}"))
+                            .title(format!("Could not export {}", job.label))
+                            .autohide(false),
+                        cx,
+                    ),
                 }
             }
-            Err(ExportError::Failed(error)) => {
-                window.push_notification(
-                    Notification::error(format!("{error:#}"))
-                        .title(format!("Could not export {}", job.label))
-                        .autohide(false),
-                    cx,
-                );
-                if let Some(index) = index {
-                    self.clips[index].status = ClipStatus::Pending;
-                }
-            }
+        }
+        // A clip whose parts did not all export stays to be edited.
+        if batch_done
+            && (!succeeded || batch_failed)
+            && let Some(index) = index
+        {
+            self.clips[index].status = ClipStatus::Pending;
         }
         self.start_next_job(window, cx);
         cx.notify();
@@ -357,4 +407,9 @@ impl PlicApp {
             )
             .child(Progress::new(("job-progress", id)).value(job.progress.unwrap_or(0.0) * 100.0))
     }
+}
+
+/// `name-1`, `name-2`, …: the file name of one of several separate parts.
+fn part_name(name: &str, index: usize) -> String {
+    format!("{name}-{}", index + 1)
 }
