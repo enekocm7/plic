@@ -5,6 +5,7 @@
 
 mod export;
 mod frames;
+mod graph;
 mod probe;
 mod transform;
 

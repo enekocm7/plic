@@ -21,7 +21,11 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 
-use super::{CommandExt as _, FrameSize, Transform, seconds_arg};
+use super::{
+    CommandExt as _, FrameSize, Transform,
+    graph::{self, AudioPlan},
+    seconds_arg,
+};
 use crate::trim::TrimRange;
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
@@ -118,8 +122,9 @@ pub struct ExportRequest {
     pub mode: ExportMode,
     /// Length of the source, used to report progress for open-ended ranges.
     pub source_duration: Option<Duration>,
-    /// Whether the source has sound; joining needs to know up front.
-    pub has_audio: bool,
+    /// Audio streams (`0:a:N`) to keep, mixed into one when there are
+    /// several. Empty drops the sound.
+    pub audio_tracks: Vec<usize>,
     /// Display size of the source, needed to crop it.
     pub video_size: Option<FrameSize>,
     pub transform: Transform,
@@ -200,16 +205,14 @@ pub fn export(
 
     let mut command = Command::new("ffmpeg");
     command.args(["-hide_banner", "-loglevel", "error", "-nostats", "-y"]);
+    let audio = AudioPlan {
+        tracks: &request.audio_tracks,
+        chain: None,
+    };
     // Kept alive until ffmpeg is done with it.
     let mut _concat_list = None;
-    match (request.mode, ranges.as_slice()) {
-        (_, [range]) => {
-            add_input(&mut command, request, *range);
-            if let Some(filter) = &video_filter {
-                command.arg("-vf").arg(filter);
-            }
-        }
-        (ExportMode::Reencode, _) => {
+    match request.mode {
+        ExportMode::Reencode => {
             // One seeked input per range, joined by the concat filter: every
             // cut stays frame-accurate and the joins are seamless.
             for range in &ranges {
@@ -217,34 +220,42 @@ pub fn export(
             }
             command
                 .arg("-filter_complex")
-                .arg(concat_filter(
+                .arg(graph::reencode(
                     ranges.len(),
-                    request.has_audio,
                     video_filter.as_deref(),
+                    audio,
                 ))
-                .args(["-map", "[v]"]);
-            if request.has_audio {
-                command.args(["-map", "[a]"]);
+                .args(["-map", "[v]"])
+                .args(encoder().args);
+            if !audio.is_silent() {
+                command.args(["-map", "[a]", "-c:a", "aac", "-b:a", "192k"]);
             }
         }
-        (ExportMode::StreamCopy, _) => {
-            let list = create_temp_path(output, "txt")?;
-            fs::write(&list, concat_list(&request.source, &ranges))
-                .with_context(|| format!("could not write {}", list.display()))?;
-            command
-                .args(["-f", "concat", "-safe", "0", "-i"])
-                .arg(&list);
-            _concat_list = Some(OwnedTempFile(list));
-        }
-    }
-    match request.mode {
-        ExportMode::Reencode => {
-            command
-                .args(encoder().args)
-                .args(["-c:a", "aac", "-b:a", "192k"]);
-        }
         ExportMode::StreamCopy => {
-            command.args(["-c", "copy"]);
+            if let [range] = ranges.as_slice() {
+                add_input(&mut command, request, *range);
+            } else {
+                let list = create_temp_path(output, "txt")?;
+                fs::write(&list, concat_list(&request.source, &ranges))
+                    .with_context(|| format!("could not write {}", list.display()))?;
+                command
+                    .args(["-f", "concat", "-safe", "0", "-i"])
+                    .arg(&list);
+                _concat_list = Some(OwnedTempFile(list));
+            }
+            command.args(["-map", "0:v:0", "-c:v", "copy"]);
+            if let Some(audio_graph) = graph::copy_audio(audio) {
+                // Mixed or filtered sound has to be encoded again.
+                command
+                    .arg("-filter_complex")
+                    .arg(audio_graph)
+                    .args(["-map", "[a]", "-c:a", "aac", "-b:a", "192k"]);
+            } else if let [track] = audio.tracks {
+                command
+                    .arg("-map")
+                    .arg(format!("0:a:{track}"))
+                    .args(["-c:a", "copy"]);
+            }
         }
     }
     command
@@ -333,34 +344,6 @@ fn add_input(command: &mut Command, request: &ExportRequest, range: TrimRange) {
         command.args(["-hwaccel", "auto"]);
     }
     command.arg("-i").arg(&request.source);
-}
-
-/// `[0:v:0][0:a:0][1:v:0][1:a:0]concat=n=2:v=1:a=1[v][a]`, with
-/// `video_chain` applied to the joined video when given.
-fn concat_filter(inputs: usize, has_audio: bool, video_chain: Option<&str>) -> String {
-    let mut filter = String::new();
-    for input in 0..inputs {
-        filter.push_str(&format!("[{input}:v:0]"));
-        if has_audio {
-            filter.push_str(&format!("[{input}:a:0]"));
-        }
-    }
-    let video_label = if video_chain.is_some() {
-        "[joined]"
-    } else {
-        "[v]"
-    };
-    filter.push_str(&format!(
-        "concat=n={inputs}:v=1:a={}{video_label}",
-        u8::from(has_audio)
-    ));
-    if has_audio {
-        filter.push_str("[a]");
-    }
-    if let Some(chain) = video_chain {
-        filter.push_str(&format!(";[joined]{chain}[v]"));
-    }
-    filter
 }
 
 /// A concat demuxer script that plays `ranges` of `source` back to back.
@@ -521,22 +504,6 @@ mod tests {
         );
         assert_eq!(estimated_size(60 * mb, minute, minute * 2), 60 * mb);
         assert_eq!(estimated_size(60 * mb, Duration::ZERO, minute), 0);
-    }
-
-    #[test]
-    fn builds_the_concat_filter() {
-        assert_eq!(
-            concat_filter(2, true, None),
-            "[0:v:0][0:a:0][1:v:0][1:a:0]concat=n=2:v=1:a=1[v][a]"
-        );
-        assert_eq!(
-            concat_filter(3, false, None),
-            "[0:v:0][1:v:0][2:v:0]concat=n=3:v=1:a=0[v]"
-        );
-        assert_eq!(
-            concat_filter(2, true, Some("hflip")),
-            "[0:v:0][0:a:0][1:v:0][1:a:0]concat=n=2:v=1:a=1[joined][a];[joined]hflip[v]"
-        );
     }
 
     #[test]

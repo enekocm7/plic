@@ -15,6 +15,7 @@ use std::{
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::notification::Notification;
@@ -949,6 +950,72 @@ impl PlicApp {
             )
     }
 
+    /// Adds or removes one audio track of the selected clip.
+    fn toggle_audio_track(&mut self, track: usize, keep: bool, cx: &mut Context<Self>) {
+        let Some(entry) = self.current_mut() else {
+            return;
+        };
+        let mut tracks = entry.export_tracks();
+        tracks.retain(|&other| other != track);
+        if keep {
+            tracks.push(track);
+            tracks.sort_unstable();
+        }
+        entry.audio_tracks = Some(tracks);
+        self.editor.export_error = None;
+        cx.notify();
+    }
+
+    /// Which of the clip's audio tracks are exported.
+    fn render_audio_controls(&self, entry: &ClipEntry, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let tracks = entry
+            .info()
+            .map(|info| info.audio_tracks.clone())
+            .unwrap_or_default();
+        let kept = entry.export_tracks();
+        let summary = match (tracks.len(), kept.len()) {
+            (_, 0) => "No audio",
+            (1, _) => "Original sound",
+            (_, 1) => "One track",
+            _ => "Mixed into one track",
+        };
+        let rows = tracks.iter().enumerate().map(|(index, track)| {
+            let label = if tracks.len() == 1 {
+                "Keep the sound".to_string()
+            } else {
+                track.describe(index)
+            };
+            Checkbox::new(("audio-track", index))
+                .small()
+                .label(label)
+                .checked(kept.contains(&index))
+                .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                    this.toggle_audio_track(index, *checked, cx)
+                }))
+        });
+        v_flex()
+            .gap_1p5()
+            .child(
+                h_flex()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.muted_foreground)
+                            .child("Audio"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(summary),
+                    ),
+            )
+            .children(rows)
+    }
+
     fn set_mode(&mut self, lossless: bool, cx: &mut Context<Self>) {
         self.editor.mode = if lossless {
             ExportMode::StreamCopy
@@ -1225,6 +1292,10 @@ impl PlicApp {
                         .when_some(entry.filter(|_| enabled), |panel, entry| {
                             panel.child(self.render_frame_controls(entry, cx))
                         })
+                        .when_some(
+                            entry.filter(|entry| entry.info().is_some_and(|info| info.has_audio)),
+                            |panel, entry| panel.child(self.render_audio_controls(entry, cx)),
+                        )
                         .child(summary)
                         .child(v_flex().gap_1p5().child(mode_row).children(snapped))
                         .child(

@@ -139,7 +139,7 @@ impl PlicApp {
                         ffmpeg::ExportMode::Reencode
                     },
                     source_duration: info.duration,
-                    has_audio: info.has_audio,
+                    audio_tracks: entry.export_tracks(),
                     video_size: info.video_size,
                     transform: entry.transform,
                 })

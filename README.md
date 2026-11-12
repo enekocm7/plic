@@ -42,6 +42,10 @@ Under **Frame**, crop the export to 16:9, 9:16, 1:1 or 4:5 (the viewer
 shows what is kept, and a slider moves the crop), rotate it in quarter
 turns, or flip it. These always re-encode.
 
+Under **Audio**, pick which audio tracks to keep. Recordings with separate
+game and microphone tracks are mixed into one; untick everything to drop
+the sound.
+
 Turn on **Lossless** in the export panel to copy the video instead of
 re-encoding it: the export is near-instant and keeps the original quality,
 but the cut starts on the keyframe at or before the chosen start. The panel
