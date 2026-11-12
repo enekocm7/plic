@@ -52,6 +52,8 @@ const GROUPS: &[Group] = &[
                 "Save the frame as PNG or JPEG",
             ),
             (&["delete"], "Delete"),
+            (&["ctrl-a"], "Select every clip in the list"),
+            (&["escape"], "Select just one clip again"),
             (&["ctrl-o"], "Open a folder"),
             (&["f5"], "Rescan the folder"),
             (&["ctrl-t"], "Light or dark theme"),

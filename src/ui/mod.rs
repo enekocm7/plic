@@ -1,6 +1,7 @@
 //! The GPUI front end.
 
 mod app;
+mod batch;
 mod clip_actions;
 mod clip_filter;
 mod editor;
@@ -30,6 +31,7 @@ actions!(
     [
         SelectPreviousClip,
         SelectNextClip,
+        SelectAllClips,
         TogglePlay,
         SeekBackward,
         SeekForward,
@@ -98,6 +100,7 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("s", SplitAtPlayhead, shortcuts),
         KeyBinding::new("r", ToggleLoop, shortcuts),
         KeyBinding::new("delete", DeleteClip, shortcuts),
+        KeyBinding::new("ctrl-a", SelectAllClips, shortcuts),
         KeyBinding::new("?", ShowShortcuts, shortcuts),
         KeyBinding::new("f11", ToggleFullscreen, Some(CONTEXT)),
         KeyBinding::new("f1", ShowShortcuts, Some(CONTEXT)),

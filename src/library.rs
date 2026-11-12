@@ -162,6 +162,30 @@ pub fn restore_original(archived: &Path) -> Result<PathBuf> {
     Ok(destination)
 }
 
+/// Moves a clip into `folder`, keeping its name. Fails rather than
+/// overwrite a file of the same name.
+pub fn move_into(source: &Path, folder: &Path) -> Result<PathBuf> {
+    let name = source.file_name().context("clip has no file name")?;
+    let destination = folder.join(name);
+    if destination.exists() {
+        bail!("{} already exists", destination.display());
+    }
+    fs::rename(source, &destination)
+        .or_else(|_| {
+            // Another drive: copy, then remove the original.
+            fs::copy(source, &destination)?;
+            fs::remove_file(source)
+        })
+        .with_context(|| {
+            format!(
+                "could not move {} to {}",
+                display_name(source),
+                folder.display()
+            )
+        })?;
+    Ok(destination)
+}
+
 /// Sends a clip to the recycle bin / trash so a mistaken delete can be undone.
 pub fn trash_clip(path: &Path) -> Result<()> {
     trash::delete(path)
