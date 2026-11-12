@@ -495,10 +495,10 @@ struct Onsets {
 }
 
 impl Onsets {
-    fn new(threshold: f32) -> Self {
+    fn new(threshold: f32, quiet: f64) -> Self {
         Self {
             threshold,
-            quiet: u64::from(SAMPLE_RATE) / 2,
+            quiet: (quiet * f64::from(SAMPLE_RATE)) as u64,
             index: 0,
             last_loud: None,
             found: Vec::new(),
@@ -526,7 +526,7 @@ fn audio_beeps(path: &Path, from: f64, window: f64, timing: Timing) -> Vec<f64> 
         .spawn()
         .unwrap();
     let mut stdout = child.stdout.take().unwrap();
-    let mut onsets = Onsets::new(0.12);
+    let mut onsets = Onsets::new(0.12, 0.5);
     let wanted = (window * f64::from(SAMPLE_RATE)) as u64;
     let mut buffer = vec![0u8; 64 * 1024];
     let mut carry = 0;
@@ -1041,7 +1041,7 @@ fn align(path: &Path) -> Alignment {
         .map(|b| f32::from_le_bytes(*b))
         .collect();
     let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
-    let mut onsets = Onsets::new((peak * 0.25).max(0.01));
+    let mut onsets = Onsets::new((peak * 0.25).max(0.01), 0.1);
     samples.iter().for_each(|&s| onsets.push(s));
     let beeps: Vec<f64> = onsets
         .found
@@ -1067,6 +1067,42 @@ fn align(path: &Path) -> Alignment {
         unpaired,
         start: (audio_start - video_start) * 1000.0,
         end: (audio_end - video_end) * 1000.0,
+    }
+}
+
+/// Exports that re-encode, and a lossless cut of one range, keep every
+/// flash within a frame (plus 5 ms) of its beep. Lossless joins are left
+/// out: they can only start on keyframes, and with B-frames the picture of
+/// every piece after the first lags by the reorder delay.
+#[test]
+#[ignore]
+fn export_keeps_picture_and_sound_together() {
+    let dir = bench_dir().join("exports");
+    fs::create_dir_all(&dir).unwrap();
+    for spec in [SYNC_MARKS_2997, SYNC_AUDIO_LATE, SYNC_VIDEO_LATE] {
+        let fixture = sync_fixture(&spec);
+        let info = info_of(&fixture.path);
+        let rate = info.frame_rate.unwrap_or(30.0);
+        for case in CASES
+            .iter()
+            .filter(|case| case.mode == REENCODE || case.name == "copy single")
+        {
+            let output = dir.join("checked.mp4");
+            let _ = fs::remove_file(&output);
+            let request = request(&fixture.path, &output, &info, case);
+            ffmpeg::export(&request, &CancelToken::default(), |_| {}).unwrap();
+            let alignment = align(&output);
+            let _ = fs::remove_file(&output);
+            let output_rate = case.max_fps.map_or(rate, |cap| rate.min(f64::from(cap)));
+            let limit = 1000.0 / output_rate + 5.0;
+            assert!(
+                alignment.offset <= limit,
+                "{} {}: sound is {:.1} ms from the picture, over {limit:.1} ms",
+                spec.name,
+                case.name,
+                alignment.offset,
+            );
+        }
     }
 }
 
