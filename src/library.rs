@@ -112,7 +112,7 @@ fn sort_key(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-fn is_video(path: &Path) -> bool {
+pub fn is_video(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| {

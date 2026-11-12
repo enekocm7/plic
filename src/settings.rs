@@ -67,8 +67,13 @@ pub fn get() -> Settings {
         .unwrap_or_default()
 }
 
+/// The folder plic keeps its files in.
+pub fn config_dir() -> Option<PathBuf> {
+    dirs::config_dir().map(|dir| dir.join("plic"))
+}
+
 fn file() -> Option<PathBuf> {
-    dirs::config_dir().map(|dir| dir.join("plic").join("settings.json"))
+    config_dir().map(|dir| dir.join("settings.json"))
 }
 
 /// Reads the settings file, if there is one. A missing or unreadable file

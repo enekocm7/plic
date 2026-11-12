@@ -2,6 +2,7 @@
 
 mod app;
 mod clip_actions;
+mod clip_filter;
 mod editor;
 mod frame_image;
 mod jobs;
@@ -36,6 +37,12 @@ actions!(
         JumpToStart,
         JumpToEnd,
         ToggleMute,
+        ToggleMarker,
+        NextMarker,
+        PreviousMarker,
+        TrimToMarkers,
+        ToggleFullscreen,
+        ExitFullscreen,
         MarkIn,
         MarkOut,
         ResetTrim,
@@ -75,6 +82,12 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("home", JumpToStart, shortcuts),
         KeyBinding::new("end", JumpToEnd, shortcuts),
         KeyBinding::new("m", ToggleMute, shortcuts),
+        KeyBinding::new("b", ToggleMarker, shortcuts),
+        KeyBinding::new("]", NextMarker, shortcuts),
+        KeyBinding::new("[", PreviousMarker, shortcuts),
+        KeyBinding::new("shift-b", TrimToMarkers, shortcuts),
+        KeyBinding::new("f", ToggleFullscreen, shortcuts),
+        KeyBinding::new("escape", ExitFullscreen, shortcuts),
         KeyBinding::new("i", MarkIn, shortcuts),
         KeyBinding::new("o", MarkOut, shortcuts),
         KeyBinding::new("shift-i", JumpToIn, shortcuts),
@@ -85,6 +98,7 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("r", ToggleLoop, shortcuts),
         KeyBinding::new("delete", DeleteClip, shortcuts),
         KeyBinding::new("?", ShowShortcuts, shortcuts),
+        KeyBinding::new("f11", ToggleFullscreen, Some(CONTEXT)),
         KeyBinding::new("f1", ShowShortcuts, Some(CONTEXT)),
         KeyBinding::new("ctrl-,", ShowSettings, Some(CONTEXT)),
         // Works from inside the editor's text fields too.
@@ -112,12 +126,24 @@ pub fn run(folder: Option<PathBuf>) {
             // first export needs it.
             crate::ffmpeg::warm_up_encoder(crate::ffmpeg::Codec::default());
             // Video reads best on a dark surround, whatever the OS theme.
-            Theme::change(ThemeMode::Dark, None, cx);
+            let mode = if crate::state::get().dark_theme {
+                ThemeMode::Dark
+            } else {
+                ThemeMode::Light
+            };
+            Theme::change(mode, None, cx);
             bind_keys(cx);
-            cx.on_action(|_: &Quit, cx| cx.quit());
+            cx.on_action(|_: &Quit, cx| {
+                crate::state::save();
+                cx.quit()
+            });
+            cx.on_window_closed(|_, _| crate::state::save()).detach();
 
             let options = WindowOptions {
-                window_bounds: Some(WindowBounds::centered(size(px(1360.), px(860.)), cx)),
+                window_bounds: Some(
+                    remembered_bounds()
+                        .unwrap_or_else(|| WindowBounds::centered(size(px(1360.), px(860.)), cx)),
+                ),
                 window_min_size: Some(size(px(960.), px(600.))),
                 app_id: Some("plic".into()),
                 ..TitleBar::window_options()
@@ -129,4 +155,38 @@ pub fn run(folder: Option<PathBuf>) {
             .expect("failed to open the main window");
             cx.activate(true);
         });
+}
+
+/// The window bounds from the last run, if they are worth restoring.
+fn remembered_bounds() -> Option<WindowBounds> {
+    let rect = crate::state::get().window?;
+    if rect.width < 960. || rect.height < 600. {
+        return None;
+    }
+    let bounds = Bounds {
+        origin: point(px(rect.x), px(rect.y)),
+        size: size(px(rect.width), px(rect.height)),
+    };
+    Some(if rect.maximized {
+        WindowBounds::Maximized(bounds)
+    } else {
+        WindowBounds::Windowed(bounds)
+    })
+}
+
+/// Remembers where the window is, to restore it on the next run.
+fn record_bounds(window: &Window) {
+    let (bounds, maximized) = match window.window_bounds() {
+        WindowBounds::Windowed(bounds) => (bounds, false),
+        WindowBounds::Maximized(bounds) => (bounds, true),
+        WindowBounds::Fullscreen(_) => return,
+    };
+    let rect = crate::state::WindowRect {
+        x: f32::from(bounds.origin.x),
+        y: f32::from(bounds.origin.y),
+        width: f32::from(bounds.size.width),
+        height: f32::from(bounds.size.height),
+        maximized,
+    };
+    crate::state::update(|state| state.window = Some(rect));
 }

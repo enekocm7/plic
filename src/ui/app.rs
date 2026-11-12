@@ -8,7 +8,8 @@ use std::{
 };
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonVariants as _, DropdownButton};
+use gpui_kit::component::menu::PopupMenuItem;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, Sizable as _, Theme, ThemeMode, TitleBar, h_flex, v_flex,
 };
@@ -16,10 +17,12 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use super::{
-    AddSegment, CONTEXT, CopyLastExport, DeleteClip, ExportClip, JumpToEnd, JumpToIn, JumpToOut,
-    JumpToStart, MarkIn, MarkOut, OpenFolder, Reload, ResetTrim, SaveFrame, SaveFrameJpeg,
-    SeekBackward, SeekForward, SelectNextClip, SelectPreviousClip, ShowSettings, ShowShortcuts,
-    SplitAtPlayhead, StepBackward, StepForward, ToggleLoop, ToggleMute, TogglePlay, ToggleTheme,
+    AddSegment, CONTEXT, CopyLastExport, DeleteClip, ExitFullscreen, ExportClip, JumpToEnd,
+    JumpToIn, JumpToOut, JumpToStart, MarkIn, MarkOut, NextMarker, OpenFolder, PreviousMarker,
+    Reload, ResetTrim, SaveFrame, SaveFrameJpeg, SeekBackward, SeekForward, SelectNextClip,
+    SelectPreviousClip, ShowSettings, ShowShortcuts, SplitAtPlayhead, StepBackward, StepForward,
+    ToggleFullscreen, ToggleLoop, ToggleMarker, ToggleMute, TogglePlay, ToggleTheme, TrimToMarkers,
+    clip_filter::ClipFilter,
     editor::Editor,
     frame_image,
     jobs::{ExportJob, FinishedExport},
@@ -30,8 +33,13 @@ use crate::{
     ffmpeg::{self, AudioAdjust, FrameSize, MediaInfo, RawFrame, Transform},
     library::{self, ClipFile, Library},
     trim::{Segments, TrimRange},
+    watcher::FolderWatcher,
     worker::WorkerPool,
 };
+
+/// How long the folder must stay quiet before it is rescanned, so
+/// recordings that are still being written are not listed early.
+const WATCH_SETTLE: Duration = Duration::from_secs(2);
 
 /// Thumbnails are decoded at twice their on-screen size for HiDPI displays.
 const THUMBNAIL_SIZE: FrameSize = FrameSize::new(160, 90);
@@ -118,10 +126,16 @@ impl ClipEntry {
 
 pub struct PlicApp {
     pub(super) focus: FocusHandle,
+    /// The viewer fills the window, hiding everything else.
+    fullscreen: bool,
     pub(super) player: Entity<Player>,
     pub(super) editor: Editor,
+    /// Search box, ordering and status filter of the clip list.
+    pub(super) filter: ClipFilter,
     /// The clips folder.
     pub(super) folder: Option<PathBuf>,
+    /// Keeps the clips folder watched; dropped when another folder opens.
+    watch: Option<(FolderWatcher, Task<()>)>,
     pub(super) clips: Vec<ClipEntry>,
     /// Subfolders that exported clips can be saved into.
     pub(super) folders: Vec<PathBuf>,
@@ -165,13 +179,18 @@ impl PlicApp {
             move |window, cx| focus.focus(window, cx)
         });
         let player = cx.new(Player::new);
+        cx.observe_window_bounds(window, |_, window, _| super::record_bounds(window))
+            .detach();
         cx.subscribe_in(&player, window, Self::on_player_event)
             .detach();
         let mut app = Self {
             focus,
+            fullscreen: false,
             player,
             editor: Editor::new(window, cx),
+            filter: ClipFilter::new(window, cx),
             folder: None,
+            watch: None,
             clips: Vec::new(),
             folders: Vec::new(),
             last_folder: None,
@@ -226,6 +245,9 @@ impl PlicApp {
         if self.folder.as_ref() != Some(&folder) {
             self.last_folder = None;
         }
+        crate::state::update(|state| state.remember_folder(&folder));
+        crate::state::save();
+        self.watch_folder(&folder, window, cx);
         self.folder = Some(folder);
         self.sync_folder_choices(window, cx);
         self.selected = None;
@@ -248,6 +270,102 @@ impl PlicApp {
             self.load_settled_details(cx);
         }
         cx.notify();
+    }
+
+    /// Picks up recordings that appear in the folder, and notices ones that
+    /// disappear, without touching the drafts of the other clips.
+    fn watch_folder(&mut self, folder: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        self.watch = None;
+        let Ok((watcher, mut changes)) = FolderWatcher::start(folder) else {
+            return;
+        };
+        let task = cx.spawn_in(window, async move |this, cx| {
+            use futures::StreamExt as _;
+            while changes.next().await.is_some() {
+                // Wait for a quiet moment: writes arrive in a stream.
+                loop {
+                    cx.background_executor().timer(WATCH_SETTLE).await;
+                    let mut more = false;
+                    while changes.try_recv().is_ok() {
+                        more = true;
+                    }
+                    if !more {
+                        break;
+                    }
+                }
+                let refreshed = this.update_in(cx, |this, window, cx| {
+                    this.refresh_folder(window, cx);
+                });
+                if refreshed.is_err() {
+                    return;
+                }
+            }
+        });
+        self.watch = Some((watcher, task));
+    }
+
+    /// Merges a fresh scan into the lists: new recordings are added and
+    /// vanished ones dropped, while every other clip keeps its draft.
+    fn refresh_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(folder) = self.folder.clone() else {
+            return;
+        };
+        let Ok(library) = Library::scan(&folder) else {
+            return;
+        };
+        let mut changed = false;
+
+        let gone: Vec<PathBuf> = self
+            .clips
+            .iter()
+            .filter(|entry| entry.status == ClipStatus::Pending)
+            .filter(|entry| {
+                !library
+                    .clips
+                    .iter()
+                    .any(|file| file.path == entry.file.path)
+            })
+            .map(|entry| entry.file.path.clone())
+            .collect();
+        for path in gone {
+            if let Some(index) = self.index_of(&path) {
+                let entry = self.take_clip(index, window, cx);
+                self.stale_images.extend(entry.thumbnail);
+                changed = true;
+            }
+        }
+
+        for file in library.clips {
+            if self.index_of(&file.path).is_some() || self.settled_index_of(&file.path).is_some() {
+                continue;
+            }
+            let path = file.path.clone();
+            let key = file.file_name().to_lowercase();
+            let position = self
+                .clips
+                .partition_point(|clip| clip.file.file_name().to_lowercase() < key);
+            self.clips.insert(position, ClipEntry::new(file));
+            if let Some(selected) = &mut self.selected
+                && *selected >= position
+            {
+                *selected += 1;
+            }
+            self.load_details(path, cx);
+            changed = true;
+        }
+
+        if library.folders != self.folders {
+            self.folders = library.folders;
+            self.sync_folder_choices(window, cx);
+            changed = true;
+        }
+        if changed {
+            // A clip may have appeared in an empty library.
+            if self.selected.is_none() && self.settled_selected.is_none() {
+                self.select(0, window, cx);
+            }
+            cx.notify();
+        }
     }
 
     fn load_settled_details(&mut self, cx: &mut Context<Self>) {
@@ -310,8 +428,14 @@ impl PlicApp {
         }
         self.selected = Some(index);
         self.settled_selected = None;
-        self.list_scroll
-            .scroll_to_item(index, ScrollStrategy::Nearest);
+        if let Some(row) = self
+            .visible(super::library_panel::List::Clips, cx)
+            .iter()
+            .position(|&visible| visible == index)
+        {
+            self.list_scroll
+                .scroll_to_item(row, ScrollStrategy::Nearest);
+        }
         self.show_selected_in_player(cx);
         self.sync_editor(window, cx);
         cx.notify();
@@ -330,8 +454,14 @@ impl PlicApp {
         }
         self.settled_selected = Some(index);
         self.selected = None;
-        self.settled_scroll
-            .scroll_to_item(index, ScrollStrategy::Nearest);
+        if let Some(row) = self
+            .visible(super::library_panel::List::Settled, cx)
+            .iter()
+            .position(|&visible| visible == index)
+        {
+            self.settled_scroll
+                .scroll_to_item(row, ScrollStrategy::Nearest);
+        }
         self.show_selected_in_player(cx);
         self.sync_editor(window, cx);
         cx.notify();
@@ -586,6 +716,57 @@ impl PlicApp {
         self.player.update(cx, |player, cx| player.toggle_mute(cx));
     }
 
+    fn toggle_marker(&mut self, _: &ToggleMarker, _: &mut Window, cx: &mut Context<Self>) {
+        self.player
+            .update(cx, |player, cx| player.toggle_marker(cx));
+    }
+
+    fn next_marker(&mut self, _: &NextMarker, window: &mut Window, cx: &mut Context<Self>) {
+        self.player
+            .update(cx, |player, cx| player.jump_to_next_marker(window, cx));
+    }
+
+    fn previous_marker(&mut self, _: &PreviousMarker, window: &mut Window, cx: &mut Context<Self>) {
+        self.player
+            .update(cx, |player, cx| player.jump_to_previous_marker(window, cx));
+    }
+
+    fn trim_to_markers(&mut self, _: &TrimToMarkers, _: &mut Window, cx: &mut Context<Self>) {
+        self.player
+            .update(cx, |player, cx| player.trim_between_markers(cx));
+    }
+
+    fn toggle_fullscreen(
+        &mut self,
+        _: &ToggleFullscreen,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_fullscreen(!self.fullscreen, window, cx);
+    }
+
+    fn exit_fullscreen(&mut self, _: &ExitFullscreen, window: &mut Window, cx: &mut Context<Self>) {
+        if self.fullscreen {
+            self.set_fullscreen(false, window, cx);
+        } else {
+            cx.propagate();
+        }
+    }
+
+    fn set_fullscreen(&mut self, fullscreen: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.fullscreen == fullscreen {
+            return;
+        }
+        self.fullscreen = fullscreen;
+        if window.is_fullscreen() != fullscreen {
+            window.toggle_fullscreen();
+        }
+        self.player
+            .update(cx, |player, cx| player.set_fullscreen(fullscreen, cx));
+        self.focus.focus(window, cx);
+        cx.notify();
+    }
+
     fn jump_to_start(&mut self, _: &JumpToStart, window: &mut Window, cx: &mut Context<Self>) {
         self.player
             .update(cx, |player, cx| player.seek(Duration::ZERO, window, cx));
@@ -605,19 +786,35 @@ impl PlicApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(selected) = self.settled_selected {
-            self.select_settled(selected.saturating_sub(1), window, cx);
-        } else if let Some(selected) = self.selected {
-            self.select(selected.saturating_sub(1), window, cx);
-        }
+        self.select_neighbour(-1, window, cx);
     }
 
     fn select_next(&mut self, _: &SelectNextClip, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(selected) = self.settled_selected {
-            self.select_settled(selected + 1, window, cx);
-        } else {
-            let next = self.selected.map_or(0, |selected| selected + 1);
-            self.select(next, window, cx);
+        self.select_neighbour(1, window, cx);
+    }
+
+    /// Moves the selection one row up or down the list as it is shown, in
+    /// whichever list the selection is in.
+    fn select_neighbour(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
+        use super::library_panel::List;
+        let (list, selected) = match (self.settled_selected, self.selected) {
+            (Some(selected), _) => (List::Settled, Some(selected)),
+            (None, selected) => (List::Clips, selected),
+        };
+        let rows = self.visible(list, cx);
+        let current = selected.and_then(|selected| rows.iter().position(|&row| row == selected));
+        let target = match current {
+            Some(current) => current
+                .saturating_add_signed(step)
+                .min(rows.len().saturating_sub(1)),
+            None => 0,
+        };
+        let Some(&index) = rows.get(target) else {
+            return;
+        };
+        match list {
+            List::Clips => self.select(index, window, cx),
+            List::Settled => self.select_settled(index, window, cx),
         }
     }
 
@@ -662,12 +859,47 @@ impl PlicApp {
         shortcuts::open(window, cx);
     }
 
+    /// Opens what was dropped on the window: a folder replaces the library,
+    /// and a video file opens the folder it lives in with that clip
+    /// selected. Nothing is moved.
+    fn handle_drop(
+        &mut self,
+        dropped: &ExternalPaths,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let paths = dropped.paths();
+        if let Some(folder) = paths.iter().find(|path| path.is_dir()) {
+            self.load_folder(folder.clone(), window, cx);
+            return;
+        }
+        let Some(first) = paths
+            .iter()
+            .find(|path| path.is_file() && library::is_video(path))
+        else {
+            return;
+        };
+        if let Some(parent) = first.parent()
+            && self.folder.as_deref() != Some(parent)
+        {
+            self.load_folder(parent.to_path_buf(), window, cx);
+        }
+        if let Some(index) = self.index_of(first) {
+            self.select(index, window, cx);
+        } else if let Some(index) = self.settled_index_of(first) {
+            self.settled_open = true;
+            self.load_settled_details(cx);
+            self.select_settled(index, window, cx);
+        }
+    }
+
     fn toggle_theme(&mut self, _: &ToggleTheme, window: &mut Window, cx: &mut Context<Self>) {
         let mode = if cx.theme().mode.is_dark() {
             ThemeMode::Light
         } else {
             ThemeMode::Dark
         };
+        crate::state::update(|state| state.dark_theme = mode == ThemeMode::Dark);
         Theme::change(mode, Some(window), cx);
     }
 
@@ -753,17 +985,45 @@ impl PlicApp {
                         // this, Windows treats clicks on these buttons as the
                         // start of a window move and they never fire.
                         .occlude()
-                        .child(
-                            Button::new("open-folder")
+                        .child({
+                            let app = cx.entity().downgrade();
+                            let current = self.folder.clone();
+                            DropdownButton::new("open-folder")
                                 .ghost()
                                 .small()
-                                .icon(IconName::FolderOpen)
-                                .label("Open folder")
-                                .tooltip("Open a clips folder (Ctrl+O)")
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.open_folder(&OpenFolder, window, cx)
-                                })),
-                        )
+                                .button(
+                                    Button::new("open-folder-button")
+                                        .icon(IconName::FolderOpen)
+                                        .label("Open folder")
+                                        .tooltip("Open a clips folder (Ctrl+O)")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.open_folder(&OpenFolder, window, cx)
+                                        })),
+                                )
+                                .dropdown_menu(move |menu, _, _| {
+                                    let recent: Vec<PathBuf> = crate::state::get()
+                                        .recent_folders
+                                        .into_iter()
+                                        .filter(|folder| Some(folder) != current.as_ref())
+                                        .collect();
+                                    if recent.is_empty() {
+                                        return menu.label("No recent folders");
+                                    }
+                                    recent.into_iter().fold(menu, |menu, folder| {
+                                        let app = app.clone();
+                                        let label = folder.display().to_string();
+                                        menu.item(PopupMenuItem::new(label).on_click(
+                                            move |_, window, cx| {
+                                                let folder = folder.clone();
+                                                app.update(cx, |app, cx| {
+                                                    app.load_folder(folder, window, cx)
+                                                })
+                                                .ok();
+                                            },
+                                        ))
+                                    })
+                                })
+                        })
                         .child(
                             Button::new("reload")
                                 .ghost()
@@ -839,6 +1099,12 @@ impl Render for PlicApp {
             .on_action(cx.listener(Self::jump_to_start))
             .on_action(cx.listener(Self::jump_to_end))
             .on_action(cx.listener(Self::toggle_mute))
+            .on_action(cx.listener(Self::toggle_marker))
+            .on_action(cx.listener(Self::next_marker))
+            .on_action(cx.listener(Self::previous_marker))
+            .on_action(cx.listener(Self::trim_to_markers))
+            .on_action(cx.listener(Self::toggle_fullscreen))
+            .on_action(cx.listener(Self::exit_fullscreen))
             .on_action(cx.listener(Self::mark_in))
             .on_action(cx.listener(Self::mark_out))
             .on_action(cx.listener(Self::reset_trim))
@@ -854,12 +1120,17 @@ impl Render for PlicApp {
             .on_action(cx.listener(Self::delete_clip))
             .on_action(cx.listener(Self::show_shortcuts))
             .on_action(cx.listener(Self::show_settings))
-            .child(self.render_title_bar(cx))
+            .on_drop(cx.listener(|this, dropped: &ExternalPaths, window, cx| {
+                this.handle_drop(dropped, window, cx)
+            }))
+            .when(!self.fullscreen, |this| {
+                this.child(self.render_title_bar(cx))
+            })
             .child(
                 h_flex()
                     .flex_1()
                     .min_h_0()
-                    .child(self.render_library(cx))
+                    .when(!self.fullscreen, |row| row.child(self.render_library(cx)))
                     .child(
                         v_flex()
                             .flex_1()
@@ -871,15 +1142,16 @@ impl Render for PlicApp {
                                 MouseButton::Left,
                                 cx.listener(|this, _, window, cx| this.focus.focus(window, cx)),
                             )
-                            .when(self.viewed().is_some(), |column| {
+                            .when(self.viewed().is_some() && !self.fullscreen, |column| {
                                 column.child(self.render_clip_header(cx))
                             })
                             .child(div().flex_1().min_h_0().child(self.player.clone())),
                     )
                     // Kept while exports run, so their progress stays visible.
-                    .when(self.current().is_some() || !self.jobs.is_empty(), |row| {
-                        row.child(self.render_export_panel(cx))
-                    }),
+                    .when(
+                        !self.fullscreen && (self.current().is_some() || !self.jobs.is_empty()),
+                        |row| row.child(self.render_export_panel(cx)),
+                    ),
             )
     }
 }
