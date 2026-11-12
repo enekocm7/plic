@@ -25,6 +25,7 @@ use super::{
 use crate::{
     audio::AudioOutput,
     ffmpeg::{self, CropRect, FrameSize, MediaInfo},
+    markers::Markers,
     playback::{MAX_FRAME_RATE, Playback},
     timestamp,
     trim::{self, Segments, TrimRange},
@@ -144,6 +145,7 @@ pub struct Player {
     drag: Option<Drag>,
     error: Option<SharedString>,
     segments: Segments,
+    markers: Markers,
     /// False for clips that are only viewed, such as exported originals.
     trimmable: bool,
     looping: bool,
@@ -189,6 +191,7 @@ impl Player {
             drag: None,
             error: None,
             segments: Segments::default(),
+            markers: Markers::default(),
             trimmable: true,
             looping: false,
             crop: None,
@@ -273,6 +276,7 @@ impl Player {
         self.drag = None;
         self.resume_after_drag = false;
         self.segments = Segments::default();
+        self.markers = Markers::default();
         self.waveform = None;
         self.stale_frames.extend(self.frame.take());
     }
@@ -587,6 +591,39 @@ impl Player {
         self.change_trim(TrimRange::new(start, Some(end)), cx);
     }
 
+    /// Drops a marker at the playhead, or removes the one there.
+    pub fn toggle_marker(&mut self, cx: &mut Context<Self>) {
+        if self.source.is_some() {
+            self.markers.toggle(self.position());
+            cx.notify();
+        }
+    }
+
+    pub fn jump_to_next_marker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(time) = self.markers.next_after(self.position()) {
+            self.seek(time, window, cx);
+        }
+    }
+
+    pub fn jump_to_previous_marker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(time) = self.markers.previous_before(self.position()) {
+            self.seek(time, window, cx);
+        }
+    }
+
+    /// Trims to the markers around the playhead: the one before it starts
+    /// the clip and the one after it ends it. Without a marker on a side,
+    /// that end of the clip is used.
+    pub fn trim_between_markers(&mut self, cx: &mut Context<Self>) {
+        if self.source.is_none() {
+            return;
+        }
+        let at = self.position();
+        let start = self.markers.previous_before(at).unwrap_or(Duration::ZERO);
+        let end = self.markers.next_after(at);
+        self.change_trim(TrimRange::new(start, end), cx);
+    }
+
     pub fn reset_trim(&mut self, cx: &mut Context<Self>) {
         self.change_trim(TrimRange::default(), cx);
     }
@@ -666,6 +703,7 @@ impl Player {
             waveform: self.waveform.clone(),
             hover: self.visible_hover().map(|hover| hover.at),
             drag: self.drag,
+            markers: self.markers.times().to_vec(),
             aspect_ratio: self
                 .source
                 .as_ref()

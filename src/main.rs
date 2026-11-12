@@ -6,6 +6,7 @@ mod audio;
 mod clipboard;
 mod ffmpeg;
 mod library;
+mod markers;
 mod playback;
 mod scheduler;
 mod timestamp;
