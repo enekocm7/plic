@@ -27,6 +27,8 @@ const GROUPS: &[Group] = &[
             (&["shift-b"], "Trim to the markers around the playhead"),
             (&["f", "f11"], "Fullscreen viewer"),
             (&["escape"], "Leave fullscreen"),
+            (&["=", "-"], "Zoom the timeline in or out"),
+            (&["0"], "Show the whole timeline"),
         ],
     ),
     (

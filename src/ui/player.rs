@@ -19,7 +19,7 @@ use gpui_kit::*;
 
 use super::{
     frame_image,
-    timeline::{self, Drag, TimelineState},
+    timeline::{self, Drag, TimelineState, View},
     volume,
 };
 use crate::{
@@ -50,6 +50,10 @@ const FILMSTRIPS_KEPT: usize = 8;
 const HOVER_STEPS: usize = 200;
 const HOVER_FRAME_SIZE: FrameSize = FrameSize::new(240, 135);
 const HOVER_PREVIEW_WIDTH: f32 = 160.;
+/// Zoomed all the way in, the timeline still shows this many frames.
+const MIN_VISIBLE_FRAMES: u32 = 20;
+/// How much the zoom keys zoom.
+const KEY_ZOOM: f64 = 2.0;
 
 /// Emitted when the user changes the segments from the viewer.
 pub enum PlayerEvent {
@@ -170,6 +174,8 @@ pub struct Player {
     last_activity: Instant,
     /// Whether the volume slider is being dragged.
     pub(super) dragging_volume: bool,
+    /// The part of the clip the timeline shows.
+    view: View,
 }
 
 impl Player {
@@ -208,6 +214,7 @@ impl Player {
             fullscreen: false,
             last_activity: Instant::now(),
             dragging_volume: false,
+            view: View::WHOLE,
         }
     }
 
@@ -277,6 +284,7 @@ impl Player {
         self.resume_after_drag = false;
         self.segments = Segments::default();
         self.markers = Markers::default();
+        self.view = View::WHOLE;
         self.waveform = None;
         self.stale_frames.extend(self.frame.take());
     }
@@ -384,6 +392,7 @@ impl Player {
         let was_playing = self.is_playing();
         self.playback = None;
         self.position = to;
+        self.follow_playhead();
         if was_playing && self.drag.is_none() {
             self.start_playback(to, cx);
             self.schedule_tick(window, cx);
@@ -416,6 +425,56 @@ impl Player {
             position + interval * frames as u32
         };
         self.seek(target, window, cx);
+    }
+
+    /// Zooms the timeline by `factor` around `anchor`; above 1 zooms in.
+    pub(super) fn zoom_timeline(&mut self, factor: f64, anchor: Duration, cx: &mut Context<Self>) {
+        let Some(duration) = self.duration().filter(|duration| !duration.is_zero()) else {
+            return;
+        };
+        let min_span = self.frame_interval() * MIN_VISIBLE_FRAMES;
+        let view = self.view.zoom(factor, anchor, duration, min_span);
+        if view != self.view {
+            self.view = view;
+            cx.notify();
+        }
+    }
+
+    /// Scrolls the zoomed timeline by `seconds`, negative going back.
+    pub(super) fn pan_timeline(&mut self, seconds: f64, cx: &mut Context<Self>) {
+        let Some(duration) = self.duration() else {
+            return;
+        };
+        let view = self.view.pan(seconds, duration);
+        if view != self.view {
+            self.view = view;
+            cx.notify();
+        }
+    }
+
+    /// Zooms in around the playhead, keeping it in view.
+    pub fn zoom_in(&mut self, cx: &mut Context<Self>) {
+        self.follow_playhead();
+        self.zoom_timeline(KEY_ZOOM, self.position(), cx);
+    }
+
+    pub fn zoom_out(&mut self, cx: &mut Context<Self>) {
+        self.zoom_timeline(1.0 / KEY_ZOOM, self.position(), cx);
+    }
+
+    /// Shows the whole clip again.
+    pub fn zoom_to_fit(&mut self, cx: &mut Context<Self>) {
+        if self.view.is_zoomed() {
+            self.view = View::WHOLE;
+            cx.notify();
+        }
+    }
+
+    /// Scrolls the zoomed timeline so the playhead is in view.
+    fn follow_playhead(&mut self) {
+        if let Some(duration) = self.duration() {
+            self.view = self.view.follow(self.position(), duration);
+        }
     }
 
     pub fn set_fullscreen(&mut self, fullscreen: bool, cx: &mut Context<Self>) {
@@ -710,6 +769,8 @@ impl Player {
                 .as_ref()
                 .and_then(|source| source.info.video_size)
                 .map_or(16. / 9., FrameSize::aspect_ratio),
+            view: self.view,
+            frame_interval: self.frame_interval(),
         }
     }
 
@@ -1041,6 +1102,9 @@ impl Player {
         if let Some(frame) = playback.poll_frame() {
             self.show_frame(frame);
             changed = true;
+        }
+        if self.drag.is_none() {
+            self.follow_playhead();
         }
 
         let finished = self.playback.as_ref().is_some_and(Playback::is_finished);

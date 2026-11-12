@@ -78,6 +78,11 @@ Finished exports stay listed under the queue: copy one to the clipboard
 as a file (paste it straight into Discord or Explorer) or show it in its
 folder. `Ctrl+Shift+C` copies the latest one.
 
+Zoom the timeline with the mouse wheel (around the pointer) or `=` and `-`
+(around the playhead) to trim long recordings precisely; `0` shows the
+whole clip again. Shift with the wheel scrolls along it, the view follows
+the playhead, and once frames are far enough apart each one gets a tick.
+
 Hovering the timeline shows a small preview of the frame under the
 pointer. Filmstrips of the last few clips are kept, so flipping back to
 one is instant.
