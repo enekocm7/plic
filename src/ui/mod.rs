@@ -34,6 +34,8 @@ actions!(
         TogglePlay,
         SeekBackward,
         SeekForward,
+        ShuttleBackward,
+        ShuttleForward,
         StepBackward,
         StepForward,
         JumpToStart,

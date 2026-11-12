@@ -59,16 +59,32 @@ pub const COMMANDS: &[Command] = &[
         "Playback",
         SeekBackward,
         Keys,
-        ["left", "j"],
+        ["left"],
         "Seek back"
+    ),
+    command!(
+        "shuttle_backward",
+        "Playback",
+        ShuttleBackward,
+        Keys,
+        ["j"],
+        "Play backward; press again to go faster"
     ),
     command!(
         "seek_forward",
         "Playback",
         SeekForward,
         Keys,
-        ["right", "l"],
+        ["right"],
         "Seek forward"
+    ),
+    command!(
+        "shuttle_forward",
+        "Playback",
+        ShuttleForward,
+        Keys,
+        ["l"],
+        "Play forward; press again to go faster"
     ),
     command!(
         "step_backward",
