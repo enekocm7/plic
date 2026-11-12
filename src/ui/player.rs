@@ -31,7 +31,7 @@ use crate::{
     ffmpeg::{self, CropRect, FrameSize, MediaInfo},
     frame_cache::{FrameCache, FrameKey},
     markers::Markers,
-    playback::{Playback, SPEEDS},
+    playback::{Effort, Playback, SPEEDS},
     timestamp,
     trim::{self, Segments, TrimRange},
     worker::WorkerPool,
@@ -49,6 +49,9 @@ const RESIZE_SETTLE: Duration = Duration::from_millis(250);
 /// How long a clip must stay open before its filmstrip and waveform are
 /// worked out, so flipping through clips only ever decodes their first frame.
 const EXTRAS_DELAY: Duration = Duration::from_millis(250);
+/// A paused jump at least this long shows the nearest keyframe before the
+/// exact frame, on clips that prefer hardware decoding.
+const KEYFRAME_FIRST_JUMP: Duration = Duration::from_secs(1);
 /// Memory the cache of first frames may use: about 17 frames at 1280x720.
 const FIRST_FRAME_BUDGET: usize = 64 << 20;
 
@@ -180,6 +183,8 @@ pub struct Player {
     deferred_prefetch: Vec<(PathBuf, MediaInfo, Duration)>,
     /// Whether the filmstrip and waveform still wait for the first frame.
     extras_pending: bool,
+    /// How hard playback has had to work to keep up with this clip.
+    effort: Effort,
     playback: Option<Playback>,
     /// The playhead while no playback is running.
     position: Duration,
@@ -247,6 +252,7 @@ impl Player {
             prefetching: HashSet::new(),
             deferred_prefetch: Vec::new(),
             extras_pending: false,
+            effort: Effort::Normal,
             playback: None,
             position: Duration::ZERO,
             frame: None,
@@ -362,6 +368,7 @@ impl Player {
             return;
         }
         let size = self.decode_size_of(info);
+        let hardware = info.prefers_hardware_decode();
         let Some(key) = FrameKey::new(&path, start, size) else {
             return;
         };
@@ -374,7 +381,7 @@ impl Player {
             if epoch.load(Ordering::Relaxed) != queued_at {
                 anyhow::bail!("another clip was opened");
             }
-            ffmpeg::extract_frame(&path, start, size)
+            ffmpeg::extract_frame(&path, start, size, hardware)
         });
         cx.spawn(async move |this, cx| {
             let frame = job.await;
@@ -422,6 +429,7 @@ impl Player {
         self.live_generation
             .store(self.generation, Ordering::Relaxed);
         self.extras_pending = false;
+        self.effort = Effort::Normal;
         self.deferred_prefetch.clear();
         self.stop_rewind();
         self.source = None;
@@ -515,7 +523,15 @@ impl Player {
         } else {
             None
         };
-        let result = Playback::start(&source.path, from, size, &source.info, self.speed, audio);
+        let result = Playback::start(
+            &source.path,
+            from,
+            size,
+            &source.info,
+            self.speed,
+            self.effort,
+            audio,
+        );
         self.apply_volume();
         match result {
             Ok(playback) => {
@@ -542,6 +558,11 @@ impl Player {
             .duration
             .map(|duration| duration.saturating_sub(source.info.frame_interval()));
         let to = last_frame.map_or(to, |last| to.min(last));
+        // Clips whose exact frames are slow to reach (long keyframe
+        // intervals, heavy codecs) show the keyframe first on a big jump, so
+        // the picture answers at once; frame steps stay exact.
+        let keyframe_first = source.info.prefers_hardware_decode()
+            && to.abs_diff(self.position()) > KEYFRAME_FIRST_JUMP;
 
         let was_playing = self.is_playing();
         self.playback = None;
@@ -550,6 +571,8 @@ impl Player {
         if was_playing && self.drag.is_none() {
             self.start_playback(to, cx);
             self.schedule_tick(window, cx);
+        } else if keyframe_first {
+            self.decode_still(to, StillQuality::Fast, cx);
         } else {
             self.request_still(to, cx);
         }
@@ -1094,10 +1117,11 @@ impl Player {
         let at = duration.mul_f64((step as f64 + 0.5) / HOVER_STEPS as f64);
         let size = video_size.fit_within(HOVER_FRAME_SIZE);
         let path = source.path.clone();
+        let hardware = source.info.prefers_hardware_decode();
         let generation = self.generation;
         cx.spawn(async move |this, cx| {
             let frame = cx
-                .background_spawn(async move { ffmpeg::extract_frame(&path, at, size) })
+                .background_spawn(async move { ffmpeg::extract_frame(&path, at, size, hardware) })
                 .await;
             this.update(cx, |this, cx| {
                 if this.generation != generation {
@@ -1322,6 +1346,7 @@ impl Player {
 
         let path = source.path.clone();
         let size = self.decode_size(source);
+        let hardware = source.info.prefers_hardware_decode();
         let generation = self.generation;
         let live = Arc::clone(&self.live_generation);
         // Decodes queued for a clip that has been closed again are skipped
@@ -1331,7 +1356,7 @@ impl Player {
                 anyhow::bail!("another clip was opened");
             }
             match quality {
-                StillQuality::Exact => ffmpeg::extract_frame(&path, at, size),
+                StillQuality::Exact => ffmpeg::extract_frame(&path, at, size, hardware),
                 StillQuality::Fast => ffmpeg::extract_keyframe(&path, at, size),
             }
         });
@@ -1448,11 +1473,29 @@ impl Player {
             return;
         }
 
+        self.catch_up_if_behind(cx);
         self.restart_if_resized(cx);
         if changed {
             cx.notify();
         }
         self.schedule_tick(window, cx);
+    }
+
+    /// Restarts playback with more [`Effort`] when the decoder cannot keep
+    /// up, rather than let the picture slide ever further behind the sound.
+    fn catch_up_if_behind(&mut self, cx: &mut Context<Self>) {
+        let (Some(source), Some(playback)) = (&self.source, &self.playback) else {
+            return;
+        };
+        if !playback.is_behind() {
+            return;
+        }
+        let Some(effort) = self.effort.next(&source.info) else {
+            return;
+        };
+        self.effort = effort;
+        let position = playback.position();
+        self.start_playback(position, cx);
     }
 
     /// Restarts playback at the new decode size once a resize has settled.

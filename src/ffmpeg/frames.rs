@@ -57,8 +57,20 @@ pub struct RawFrame {
 }
 
 /// Decodes the exact frame shown at `at`, scaled to `size`.
-pub fn extract_frame(path: &Path, at: Duration, size: FrameSize) -> Result<RawFrame> {
+///
+/// `hardware` decodes on the GPU when `at` is past the start, where every
+/// frame since the previous keyframe has to be decoded first; see
+/// [`MediaInfo::prefers_hardware_decode`](super::MediaInfo).
+pub fn extract_frame(
+    path: &Path,
+    at: Duration,
+    size: FrameSize,
+    hardware: bool,
+) -> Result<RawFrame> {
     let mut command = base_command();
+    if hardware && !at.is_zero() {
+        command.args(super::hwaccel_args());
+    }
     if at.is_zero() {
         // Only the first picture is needed, so spreading it over every core
         // costs more in start-up than it saves; this is the frame shown
@@ -206,9 +218,8 @@ pub struct VideoStream {
 }
 
 impl VideoStream {
-    /// Starts decoding. `hardware` lets ffmpeg decode on the GPU, which
-    /// takes noticeably longer to start and, up to 4K, no faster than the
-    /// CPU does; see [`MediaInfo::prefers_hardware_decode`](super::MediaInfo).
+    /// Starts decoding. `hardware` lets ffmpeg decode on the GPU; see
+    /// [`MediaInfo::prefers_hardware_decode`](super::MediaInfo).
     pub fn spawn(
         path: &Path,
         start: Duration,
@@ -220,7 +231,7 @@ impl VideoStream {
         let first = timing.first_frame(start);
         let mut command = base_command();
         if hardware {
-            command.args(["-hwaccel", "auto"]);
+            command.args(super::hwaccel_args());
         }
         command
             .arg("-ss")

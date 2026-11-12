@@ -8,7 +8,7 @@ use serde::Deserialize;
 use super::{CommandExt as _, FrameSize};
 
 /// What the player and editor need to know about a clip.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct MediaInfo {
     pub duration: Option<Duration>,
     /// Display size, with rotation metadata already applied.
@@ -67,14 +67,18 @@ impl MediaInfo {
         Duration::from_secs_f64(1.0 / self.frame_rate.unwrap_or(30.0))
     }
 
-    /// Whether previews should decode on the GPU. The CPU starts faster
-    /// (half the time to the first frame) and decodes faster at every size
-    /// measured up to 4K, so the GPU is only worth it for bigger pictures,
-    /// which a CPU may not decode in real time.
+    /// Whether previews should decode on the GPU. For H.264 and HEVC up to
+    /// 4K the CPU starts faster and keeps up easily. AV1 is another matter:
+    /// a 1440p60 recording decodes at barely 90 frames a second on an
+    /// eight-core CPU, too close to real time once the app is busy, against
+    /// about 280 on the GPU, which also seeks faster within its long
+    /// keyframe intervals.
     pub fn prefers_hardware_decode(&self) -> bool {
         const UHD_PIXELS: u64 = 3840 * 2160;
-        self.video_size
-            .is_some_and(|size| u64::from(size.width) * u64::from(size.height) > UHD_PIXELS)
+        let huge = self
+            .video_size
+            .is_some_and(|size| u64::from(size.width) * u64::from(size.height) > UHD_PIXELS);
+        huge || self.video_codec.as_deref() == Some("av1")
     }
 
     pub fn timing(&self) -> Timing {

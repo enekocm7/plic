@@ -589,9 +589,9 @@ fn bench_first_frame() {
     let mut report = Report::new("first_frame");
     for (name, path) in video_fixtures() {
         // The first run only warms the file cache.
-        ffmpeg::extract_frame(&path, Duration::ZERO, VIEW).unwrap();
+        ffmpeg::extract_frame(&path, Duration::ZERO, VIEW, false).unwrap();
         let runs = (0..9)
-            .map(|_| time(|| ffmpeg::extract_frame(&path, Duration::ZERO, VIEW).unwrap()).0)
+            .map(|_| time(|| ffmpeg::extract_frame(&path, Duration::ZERO, VIEW, false).unwrap()).0)
             .collect();
         report.add(format!("first_frame {name}"), "ms", runs);
     }
@@ -612,10 +612,10 @@ fn bench_seek_still() {
     let mut report = Report::new("seek_still");
     for (name, path) in video_fixtures() {
         let duration = info_of(&path).duration.unwrap().as_secs_f64();
-        ffmpeg::extract_frame(&path, Duration::ZERO, VIEW).unwrap();
+        ffmpeg::extract_frame(&path, Duration::ZERO, VIEW, false).unwrap();
         let runs = random_positions(duration)
             .into_iter()
-            .map(|at| time(|| ffmpeg::extract_frame(&path, secs(at), VIEW).unwrap()).0)
+            .map(|at| time(|| ffmpeg::extract_frame(&path, secs(at), VIEW, false).unwrap()).0)
             .collect();
         report.add(format!("seek_still {name}"), "ms", runs);
     }
@@ -1200,7 +1200,7 @@ fn browse_eager(clips: &[PathBuf], interval: Duration, duration: Duration) -> Ve
         let (decoded, sender) = (clip.clone(), sender.clone());
         opened.push(Instant::now());
         thread::spawn(move || {
-            ffmpeg::extract_frame(&decoded, Duration::ZERO, VIEW).unwrap();
+            ffmpeg::extract_frame(&decoded, Duration::ZERO, VIEW, false).unwrap();
             sender.send((index, Instant::now())).unwrap();
         });
         background_extras(clip, duration, &filmstrip, None);
@@ -1243,7 +1243,7 @@ fn browse_latest(clips: &[PathBuf], interval: Duration, duration: Duration) -> V
                 if live.load(Ordering::Relaxed) != generation {
                     return;
                 }
-                let frame = ffmpeg::extract_frame(&clip, Duration::ZERO, VIEW).unwrap();
+                let frame = ffmpeg::extract_frame(&clip, Duration::ZERO, VIEW, false).unwrap();
                 cache.lock().unwrap().insert(key, frame);
                 let _ = sender.send(Instant::now());
             }));
@@ -1271,7 +1271,7 @@ fn browse_latest(clips: &[PathBuf], interval: Duration, duration: Duration) -> V
                     if cache.lock().unwrap().contains(&key) {
                         return;
                     }
-                    let frame = ffmpeg::extract_frame(&next, Duration::ZERO, VIEW).unwrap();
+                    let frame = ffmpeg::extract_frame(&next, Duration::ZERO, VIEW, false).unwrap();
                     cache.lock().unwrap().insert(key, frame);
                 }));
             }

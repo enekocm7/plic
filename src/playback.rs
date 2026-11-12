@@ -23,6 +23,41 @@ const MAX_SPEED: f64 = 4.0;
 /// How long playback waits for audio before starting without it.
 const AUDIO_START_TIMEOUT: Duration = Duration::from_millis(750);
 
+/// Video this far behind the clock means the decoder cannot keep up...
+const BEHIND_LIMIT: Duration = Duration::from_millis(150);
+/// ...if it stays behind this long; a single slow moment is not enough.
+const BEHIND_GRACE: Duration = Duration::from_millis(500);
+
+/// How hard playback works to keep up with a clip that decodes too slowly
+/// for real time. Each step is tried in turn when the video falls behind.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Effort {
+    /// The decoder [`MediaInfo::prefers_hardware_decode`] picks.
+    #[default]
+    Normal,
+    /// Decodes on the GPU whatever the clip.
+    Hardware,
+    /// On the GPU, and only every other frame.
+    HalfRate,
+}
+
+impl Effort {
+    /// The next step for `info`, or `None` when there is none left.
+    pub fn next(self, info: &MediaInfo) -> Option<Self> {
+        match self {
+            // Already on the GPU, so the next real step is fewer frames.
+            Self::Normal if info.prefers_hardware_decode() => Some(Self::HalfRate),
+            Self::Normal => Some(Self::Hardware),
+            Self::Hardware => Some(Self::HalfRate),
+            Self::HalfRate => None,
+        }
+    }
+
+    fn hardware(self, info: &MediaInfo) -> bool {
+        self > Self::Normal || info.prefers_hardware_decode()
+    }
+}
+
 /// The rate frames are decoded at before any speed-up: the clip's own, up
 /// to the most that is worth showing.
 pub fn decode_rate(info: &MediaInfo) -> f64 {
@@ -83,6 +118,8 @@ pub struct Playback {
     started: bool,
     playing: bool,
     speed: f64,
+    /// Since when the video has been [`BEHIND_LIMIT`] behind the clock.
+    behind_since: Option<Instant>,
 }
 
 impl Playback {
@@ -92,21 +129,19 @@ impl Playback {
         size: FrameSize,
         info: &MediaInfo,
         speed: f64,
+        effort: Effort,
         audio: Option<&mut AudioOutput>,
     ) -> Result<Self> {
         let speed = speed.clamp(MIN_SPEED, MAX_SPEED);
         let timing = info.timing();
         // Faster playback shows more media frames per second; decode fewer
         // so the display rate stays within bounds.
-        let frame_rate = decode_rate(info).clamp(1.0, MAX_FRAME_RATE / speed.max(1.0));
-        let video = VideoStream::spawn(
-            path,
-            from,
-            size,
-            frame_rate,
-            timing,
-            info.prefers_hardware_decode(),
-        )?;
+        let mut frame_rate = decode_rate(info).clamp(1.0, MAX_FRAME_RATE / speed.max(1.0));
+        if effort == Effort::HalfRate {
+            frame_rate = (frame_rate / 2.0).max(1.0);
+        }
+        let video =
+            VideoStream::spawn(path, from, size, frame_rate, timing, effort.hardware(info))?;
         // A clip whose audio cannot be decoded still plays, silently.
         let audio = audio.and_then(|output| output.start(path, from, speed, timing).ok());
         Ok(Self {
@@ -118,6 +153,7 @@ impl Playback {
             started: false,
             playing: true,
             speed,
+            behind_since: None,
         })
     }
 
@@ -139,6 +175,7 @@ impl Playback {
 
     pub fn pause(&mut self) {
         self.playing = false;
+        self.behind_since = None;
         self.clock.stop();
         if let Some(audio) = &self.audio {
             audio.set_playing(false);
@@ -181,7 +218,29 @@ impl Playback {
             due = self.pending.take();
             self.pending = self.video.try_next();
         }
+        self.track_lag(now, due.as_ref());
         due
+    }
+
+    /// Notes whether the decoder is keeping up: it is not when the newest
+    /// frame it has delivered is already well past due.
+    fn track_lag(&mut self, now: Duration, shown: Option<&RawFrame>) {
+        let starved = self.pending.is_none() && !self.video.is_finished();
+        let late = shown.is_some_and(|frame| now.saturating_sub(frame.pts) > BEHIND_LIMIT);
+        if !self.started || !self.playing {
+            self.behind_since = None;
+        } else if starved && late {
+            self.behind_since.get_or_insert_with(Instant::now);
+        } else if shown.is_some() || self.pending.is_some() {
+            self.behind_since = None;
+        }
+    }
+
+    /// True once the video has lagged the sound for a while: the decoder
+    /// cannot keep up, so playback should restart with more [`Effort`].
+    pub fn is_behind(&self) -> bool {
+        self.behind_since
+            .is_some_and(|since| since.elapsed() > BEHIND_GRACE)
     }
 
     fn ready_to_start(&self) -> bool {
@@ -227,5 +286,26 @@ mod tests {
         );
         clock.stop();
         assert!(clock.now() >= Duration::from_secs(16));
+    }
+
+    #[test]
+    fn effort_steps_up_to_the_gpu_then_fewer_frames() {
+        let h264 = MediaInfo {
+            video_codec: Some("h264".into()),
+            ..MediaInfo::default()
+        };
+        assert_eq!(Effort::Normal.next(&h264), Some(Effort::Hardware));
+        assert_eq!(Effort::Hardware.next(&h264), Some(Effort::HalfRate));
+        assert_eq!(Effort::HalfRate.next(&h264), None);
+        assert!(!Effort::Normal.hardware(&h264));
+        assert!(Effort::Hardware.hardware(&h264));
+
+        // AV1 is on the GPU from the start.
+        let av1 = MediaInfo {
+            video_codec: Some("av1".into()),
+            ..MediaInfo::default()
+        };
+        assert!(Effort::Normal.hardware(&av1));
+        assert_eq!(Effort::Normal.next(&av1), Some(Effort::HalfRate));
     }
 }

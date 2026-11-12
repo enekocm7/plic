@@ -56,6 +56,20 @@ impl CommandExt for Command {
     }
 }
 
+/// The arguments that let ffmpeg decode the next input on the GPU.
+///
+/// On Windows Direct3D 11 is named outright: `auto` tries other methods
+/// first and, on some systems, ends up decoding AV1 on the CPU at a third
+/// of the speed. ffmpeg still falls back to the CPU on its own when the
+/// GPU cannot decode a clip.
+pub(crate) fn hwaccel_args() -> [&'static str; 2] {
+    if cfg!(windows) {
+        ["-hwaccel", "d3d11va"]
+    } else {
+        ["-hwaccel", "auto"]
+    }
+}
+
 /// Seconds with millisecond precision, the form ffmpeg's `-ss`/`-t` expect.
 pub(crate) fn seconds_arg(duration: Duration) -> String {
     format!("{:.3}", duration.as_secs_f64())
