@@ -3,7 +3,7 @@
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Selectable as _, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::*;
 
 use std::collections::BTreeMap;
@@ -12,7 +12,7 @@ use super::{
     app::PlicApp,
     keymap::{self, Command},
 };
-use crate::{library, settings::Settings};
+use crate::{ffmpeg::Quality, library, settings::Settings};
 
 impl PlicApp {
     pub(super) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -55,6 +55,7 @@ impl PlicApp {
                 (command, input)
             })
             .collect();
+        let quality = std::rc::Rc::new(std::cell::Cell::new(current.export_quality));
         let focus = seek.read(cx).focus_handle(cx);
         window.defer(cx, move |window, cx| focus.focus(window, cx));
 
@@ -69,6 +70,7 @@ impl PlicApp {
                 ffmpeg.clone(),
                 keys.clone(),
             );
+            let quality = quality.clone();
             let muted = cx.theme().muted_foreground;
             let field = |label: &'static str, hint: &'static str, input: &Entity<InputState>| {
                 v_flex()
@@ -115,6 +117,28 @@ impl PlicApp {
                             }
                         }),
                 );
+            let selected = quality.get();
+            let quality_buttons = Quality::ALL.map(|choice| {
+                let quality = quality.clone();
+                Button::new(SharedString::from(format!("settings-quality-{}", choice.label())))
+                    .ghost()
+                    .small()
+                    .flex_1()
+                    .label(choice.label())
+                    .selected(selected == choice)
+                    .on_click(move |_, window, cx| {
+                        quality.set(choice);
+                        window.refresh();
+                        let _ = cx;
+                    })
+            });
+            let quality_row = v_flex()
+                .gap_1()
+                .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("Export quality"))
+                .child(h_flex().gap_0p5().children(quality_buttons))
+                .child(div().text_xs().text_color(muted).child(
+                    "How hard re-encoded exports are compressed. Small makes smaller files, High keeps more detail.",
+                ));
             dialog
                 .title("Settings")
                 .w(px(480.))
@@ -146,6 +170,7 @@ impl PlicApp {
                             "A folder with your own ffmpeg and ffprobe, used instead of the copy plic downloads. Empty uses plic's copy.",
                             &ffmpeg,
                         ))
+                        .child(quality_row)
                         .child(key_list),
                 )
                 .footer(
@@ -217,6 +242,7 @@ impl PlicApp {
                                             .to_string(),
                                         name_template: template.read(cx).value().to_string(),
                                         ffmpeg_folder: ffmpeg.read(cx).value().to_string(),
+                                        export_quality: quality.get(),
                                         key_bindings,
                                     };
                                     if let Err(error) = crate::settings::update(settings) {

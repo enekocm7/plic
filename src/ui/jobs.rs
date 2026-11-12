@@ -191,7 +191,10 @@ impl PlicApp {
                     output,
                     ranges,
                     // Cropping and rotating are filters, so they re-encode.
-                    video: self.editor.video,
+                    video: ffmpeg::VideoEncoding {
+                        quality: crate::settings::get().export_quality,
+                        ..self.editor.video
+                    },
                     mode: if entry.transform.is_identity() {
                         self.editor.mode
                     } else {

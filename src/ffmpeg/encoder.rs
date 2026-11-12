@@ -77,7 +77,9 @@ static AV1_ENCODERS: [Encoder; 5] = [
 ];
 
 /// How hard the encoder compresses, as named presets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
 pub enum Quality {
     Small,
     #[default]
