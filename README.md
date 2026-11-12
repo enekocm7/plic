@@ -140,3 +140,16 @@ A **name template** in the settings pre-fills export names, e.g.
 `{folder}-{date}-{n}`. `{name}` is the clip's own name, `{folder}` the clips
 folder, `{date}` the day it was recorded, and `{n}` counts up past names that
 already exist in the destination.
+
+Every keyboard shortcut can be changed under **Key bindings** in the same
+dialog. In `settings.json` only the changed ones are stored, by command name,
+each with a list of keys; an empty list unbinds a command:
+
+```json
+"key_bindings": {
+  "toggle_play": ["space", "p"],
+  "delete_clip": []
+}
+```
+
+The shortcuts reference (`?`) always shows the keys in effect.
