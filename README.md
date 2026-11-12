@@ -18,6 +18,24 @@ or High quality preset. Each codec uses the first hardware encoder that
 works (AMF, NVENC or Quick Sync) and falls back to `libx264`, `libx265`
 or `libsvtav1`/`libaom-av1`.
 
+## Install
+
+Download `plic-<version>-setup.exe` from the
+[latest release](https://github.com/enekocm7/plic/releases/latest), or use a
+package manager:
+
+```sh
+winget install enekocm7.plic
+scoop bucket add plic https://github.com/enekocm7/plic
+scoop install plic/plic
+```
+
+The installer (and the Scoop package) add **Open with plic** to the Explorer
+menu of folders, of the empty space inside a folder, and of `.mp4`, `.mov`,
+`.mkv`, `.webm` and `.m4v` files; opening a video opens its folder with that
+clip selected. The installer lets you leave this out, and uninstalling
+removes it. A portable `.zip` is on every release too.
+
 ## Usage
 
 ```sh
@@ -110,7 +128,16 @@ single source of the version; the release fails if the tag does not match it.
 2. Commit, then tag and push: `git tag v0.9.0 && git push origin master v0.9.0`.
 
 The workflow publishes a GitHub release with an installer
-(`plic-<version>-setup.exe`), a portable `.zip` and `SHA256SUMS.txt`.
+(`plic-<version>-setup.exe`), a portable `.zip`, the package manager
+manifests and `SHA256SUMS.txt`. The manifests are filled in from the
+templates in `packaging/` by `packaging/render-manifests.ps1`. Then:
+
+- **Scoop**: `bucket/plic.json` on `master` is updated to the new release,
+  so `scoop update` picks it up.
+- **winget**: with a `WINGET_TOKEN` secret (a classic GitHub token with the
+  `public_repo` scope), `wingetcreate` opens a pull request on
+  `microsoft/winget-pkgs`. Without it, submit the manifests attached to the
+  release by hand.
 
 plic checks for a newer release when it starts, at most once every six
 hours, and shows a banner linking to the release page. Dismissing a version
