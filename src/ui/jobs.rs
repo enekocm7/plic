@@ -289,6 +289,8 @@ impl PlicApp {
         }
         match result {
             Ok(output) if batch_done && !batch_failed => {
+                // Nothing is left to finish on this clip.
+                crate::drafts::forget(&job.request.source);
                 self.archive_exported(job, output, window, cx)
             }
             Ok(output) => {
