@@ -72,6 +72,10 @@ Finished exports stay listed under the queue: copy one to the clipboard
 as a file (paste it straight into Discord or Explorer) or show it in its
 folder. `Ctrl+Shift+C` copies the latest one.
 
+Hovering the timeline shows a small preview of the frame under the
+pointer. Filmstrips of the last few clips are kept, so flipping back to
+one is instant.
+
 The timeline shows the clip's audio waveform (every track mixed) along the
 bottom of the filmstrip, so a shout or a shot is easy to find by sound.
 

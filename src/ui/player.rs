@@ -2,7 +2,7 @@
 
 use std::{
     cell::Cell,
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     path::PathBuf,
     rc::Rc,
     sync::Arc,
@@ -41,6 +41,12 @@ const RESIZE_SETTLE: Duration = Duration::from_millis(250);
 /// Thumbnails along the timeline.
 const FILMSTRIP_TILES: usize = 12;
 const FILMSTRIP_TILE_SIZE: FrameSize = FrameSize::new(192, 108);
+/// Filmstrips of recently viewed clips kept for flipping back to them.
+const FILMSTRIPS_KEPT: usize = 8;
+/// The hover preview decodes at most this many distinct frames per clip.
+const HOVER_STEPS: usize = 200;
+const HOVER_FRAME_SIZE: FrameSize = FrameSize::new(240, 135);
+const HOVER_PREVIEW_WIDTH: f32 = 160.;
 
 /// Emitted when the user changes the segments from the viewer.
 pub enum PlayerEvent {
@@ -91,6 +97,29 @@ struct StillRequests {
     queued: Option<Duration>,
 }
 
+/// Frames for the timeline's hover preview, one per step of the clip. Only
+/// one decodes at a time; a newer position replaces the queued one.
+#[derive(Default)]
+struct HoverFrames {
+    in_flight: bool,
+    queued: Option<usize>,
+    frames: HashMap<usize, Arc<RenderImage>>,
+}
+
+/// Where the pointer rests over the timeline.
+#[derive(Clone, Copy)]
+struct Hover {
+    at: Duration,
+    /// From the timeline's left edge.
+    x: Pixels,
+    timeline_width: Pixels,
+}
+
+fn hover_step(at: Duration, duration: Duration) -> usize {
+    let fraction = at.as_secs_f64() / duration.as_secs_f64().max(f64::EPSILON);
+    ((fraction * HOVER_STEPS as f64) as usize).min(HOVER_STEPS - 1)
+}
+
 pub struct Player {
     source: Option<Source>,
     /// Bumped whenever the source changes, so late decodes are discarded.
@@ -120,6 +149,10 @@ pub struct Player {
     crop: Option<CropRect>,
     filmstrip: Vec<Option<Arc<RenderImage>>>,
     filmstrip_workers: WorkerPool,
+    /// Complete filmstrips of recently viewed clips, newest first.
+    filmstrips: VecDeque<(PathBuf, Vec<Option<Arc<RenderImage>>>)>,
+    hover: Option<Hover>,
+    hover_frames: HoverFrames,
     /// Audio peaks of the loaded clip, once worked out.
     waveform: Option<Arc<[f32]>>,
     /// Peaks of every clip opened so far; they take a moment to compute.
@@ -155,6 +188,9 @@ impl Player {
             crop: None,
             filmstrip: Vec::new(),
             filmstrip_workers: WorkerPool::new("filmstrip", 2),
+            filmstrips: VecDeque::new(),
+            hover: None,
+            hover_frames: HoverFrames::default(),
             waveform: None,
             waveforms: HashMap::new(),
             audio: AudioDevice::Unopened,
@@ -203,6 +239,22 @@ impl Player {
     }
 
     fn unload(&mut self) {
+        // Keep a finished filmstrip for when the clip is opened again.
+        let filmstrip = std::mem::take(&mut self.filmstrip);
+        match self.source.as_ref().map(|source| source.path.clone()) {
+            Some(path) if !filmstrip.is_empty() && filmstrip.iter().all(Option::is_some) => {
+                self.filmstrips.push_front((path, filmstrip));
+                while self.filmstrips.len() > FILMSTRIPS_KEPT {
+                    if let Some((_, old)) = self.filmstrips.pop_back() {
+                        self.stale_frames.extend(old.into_iter().flatten());
+                    }
+                }
+            }
+            _ => self.stale_frames.extend(filmstrip.into_iter().flatten()),
+        }
+        self.hover = None;
+        let hover_frames = std::mem::take(&mut self.hover_frames);
+        self.stale_frames.extend(hover_frames.frames.into_values());
         self.generation += 1;
         self.source = None;
         self.playback = None;
@@ -215,7 +267,6 @@ impl Player {
         self.segments = Segments::default();
         self.waveform = None;
         self.stale_frames.extend(self.frame.take());
-        self.stale_frames.extend(self.filmstrip.drain(..).flatten());
     }
 
     pub fn duration(&self) -> Option<Duration> {
@@ -577,6 +628,7 @@ impl Player {
             segments: self.trimmable.then(|| self.segments.clone()),
             filmstrip: self.filmstrip.clone(),
             waveform: self.waveform.clone(),
+            hover: self.visible_hover().map(|hover| hover.at),
             drag: self.drag,
             aspect_ratio: self
                 .source
@@ -584,6 +636,162 @@ impl Player {
                 .and_then(|source| source.info.video_size)
                 .map_or(16. / 9., FrameSize::aspect_ratio),
         }
+    }
+
+    /// Shows a preview of the frame at `at`, the pointer being `x` from the
+    /// left of a `timeline_width` wide timeline.
+    pub(super) fn hover_at(
+        &mut self,
+        at: Duration,
+        x: Pixels,
+        timeline_width: Pixels,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(duration) = self.duration().filter(|duration| !duration.is_zero()) else {
+            return;
+        };
+        let at = at.min(duration);
+        self.hover = Some(Hover {
+            at,
+            x,
+            timeline_width,
+        });
+        let step = hover_step(at, duration);
+        if !self.hover_frames.frames.contains_key(&step) {
+            self.request_hover_frame(step, cx);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn end_hover(&mut self, cx: &mut Context<Self>) {
+        if self.hover.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// The hover, unless a drag is showing its frame in the viewer already.
+    fn visible_hover(&self) -> Option<Hover> {
+        self.hover.filter(|_| self.drag.is_none())
+    }
+
+    /// Decodes the frame of a hover step, the same way paused seeks do.
+    fn request_hover_frame(&mut self, step: usize, cx: &mut Context<Self>) {
+        let Some(source) = &self.source else {
+            return;
+        };
+        let (Some(duration), Some(video_size)) = (source.info.duration, source.info.video_size)
+        else {
+            return;
+        };
+        if self.hover_frames.in_flight {
+            self.hover_frames.queued = Some(step);
+            return;
+        }
+        self.hover_frames.in_flight = true;
+        let at = duration.mul_f64((step as f64 + 0.5) / HOVER_STEPS as f64);
+        let size = video_size.fit_within(HOVER_FRAME_SIZE);
+        let path = source.path.clone();
+        let generation = self.generation;
+        cx.spawn(async move |this, cx| {
+            let frame = cx
+                .background_spawn(async move { ffmpeg::extract_frame(&path, at, size) })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.generation != generation {
+                    return;
+                }
+                this.hover_frames.in_flight = false;
+                if let Some(image) = frame.ok().and_then(frame_image::render_image) {
+                    this.hover_frames.frames.insert(step, image);
+                    cx.notify();
+                }
+                // Only the latest position matters, and only while hovering.
+                if let Some(next) = this.hover_frames.queued.take()
+                    && this.hover.is_some()
+                    && !this.hover_frames.frames.contains_key(&next)
+                {
+                    this.request_hover_frame(next, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The decoded frame for `at`, or the closest one there is meanwhile:
+    /// another hover frame or a filmstrip tile.
+    fn hover_image(&self, at: Duration) -> Option<Arc<RenderImage>> {
+        let duration = self.duration()?;
+        let step = hover_step(at, duration);
+        if let Some(frame) = self.hover_frames.frames.get(&step) {
+            return Some(frame.clone());
+        }
+        let cached = self
+            .hover_frames
+            .frames
+            .iter()
+            .map(|(&other, frame)| (other.abs_diff(step), frame));
+        let tiles = self.filmstrip.len().max(1);
+        let tile = self
+            .filmstrip
+            .iter()
+            .enumerate()
+            .filter_map(|(index, tile)| {
+                let center = (2 * index + 1) * HOVER_STEPS / (2 * tiles);
+                Some((center.abs_diff(step), tile.as_ref()?))
+            });
+        cached
+            .chain(tile)
+            .min_by_key(|(distance, _)| *distance)
+            .map(|(_, frame)| frame.clone())
+    }
+
+    /// A small frame with its time above the hovered point of the timeline.
+    fn render_hover_preview(&self, cx: &Context<Self>) -> Option<impl IntoElement> {
+        let hover = self.visible_hover()?;
+        let aspect_ratio = self
+            .source
+            .as_ref()?
+            .info
+            .video_size
+            .map_or(16. / 9., FrameSize::aspect_ratio);
+        let theme = cx.theme();
+        let width = px(HOVER_PREVIEW_WIDTH);
+        let left = (hover.x - width / 2.)
+            .min(hover.timeline_width - width)
+            .max(px(0.));
+        Some(
+            v_flex()
+                .absolute()
+                .bottom(px(timeline::HEIGHT + 4.))
+                .left(left)
+                .w(width)
+                .p_1()
+                .gap_1()
+                .rounded(theme.radius)
+                .bg(theme.popover)
+                .border_1()
+                .border_color(theme.border)
+                .shadow_md()
+                .child(
+                    div()
+                        .w_full()
+                        .h(width / aspect_ratio)
+                        .rounded(px(3.))
+                        .overflow_hidden()
+                        .bg(black())
+                        .when_some(self.hover_image(hover.at), |frame, image| {
+                            frame.child(img(image).size_full().object_fit(ObjectFit::Cover))
+                        }),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_center()
+                        .text_color(theme.popover_foreground)
+                        .child(timestamp::format_precise(hover.at)),
+                ),
+        )
     }
 
     /// Works out the clip's audio peaks to draw along the timeline, once
@@ -632,6 +840,15 @@ impl Player {
         else {
             return;
         };
+        if let Some(index) = self
+            .filmstrips
+            .iter()
+            .position(|(path, _)| *path == source.path)
+            && let Some((_, filmstrip)) = self.filmstrips.remove(index)
+        {
+            self.filmstrip = filmstrip;
+            return;
+        }
         let size = video_size.fit_within(FILMSTRIP_TILE_SIZE);
         self.filmstrip = vec![None; FILMSTRIP_TILES];
         let generation = self.generation;
@@ -1002,7 +1219,12 @@ impl Render for Player {
                         .flex_none()
                         .border_t_1()
                         .border_color(border)
-                        .child(timeline::render(self.timeline_state(), cx))
+                        .child(
+                            div()
+                                .relative()
+                                .child(timeline::render(self.timeline_state(), cx))
+                                .children(self.render_hover_preview(cx)),
+                        )
                         .child(self.render_transport(cx)),
                 )
             })
