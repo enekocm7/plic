@@ -3,7 +3,8 @@
 use std::ops::Range;
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::Button;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::Input;
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, Theme, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -11,6 +12,8 @@ use gpui_kit::*;
 
 use super::OpenFolder;
 use super::app::{ClipEntry, ClipStatus, Details, PlicApp};
+use crate::clip_order::SortKey;
+use crate::clip_order::{SortItem, StatusFilter, visible as visible_rows};
 use crate::{library, timestamp};
 
 const PANEL_WIDTH: f32 = 280.;
@@ -20,15 +23,100 @@ const SETTLED_VISIBLE_ROWS: f32 = 4.5;
 
 /// Which of the two lists a row belongs to.
 #[derive(Clone, Copy)]
-enum List {
+pub(super) enum List {
     Clips,
     Settled,
 }
 
 impl PlicApp {
+    /// Indices of the clips a list shows, in the order they are shown.
+    pub(super) fn visible(&self, list: List, cx: &App) -> Vec<usize> {
+        let entries = match list {
+            List::Clips => &self.clips,
+            List::Settled => &self.settled,
+        };
+        let names: Vec<String> = entries.iter().map(|entry| entry.file.file_name()).collect();
+        let items: Vec<SortItem> = entries
+            .iter()
+            .zip(&names)
+            .map(|(entry, name)| SortItem {
+                name,
+                modified: entry.file.modified,
+                duration: entry.info().and_then(|info| info.duration),
+                size: entry.file.size,
+            })
+            .collect();
+        visible_rows(
+            &items,
+            &self.filter.query(cx),
+            self.filter.sort,
+            self.filter.descending,
+        )
+    }
+
+    fn render_filter_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let filter = &self.filter;
+        v_flex()
+            .flex_none()
+            .px_3()
+            .pb_2()
+            .gap_1p5()
+            .child(Input::new(&filter.search).small().cleanable(true))
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Button::new("sort-key")
+                            .ghost()
+                            .xsmall()
+                            .label(format!("Sort: {}", filter.sort.label()))
+                            .tooltip("Change what the list is sorted by")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.filter.sort = this.filter.sort.next();
+                                this.filter.descending = this.filter.sort != SortKey::Name
+                                    && this.filter.sort != SortKey::Size;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("sort-direction")
+                            .ghost()
+                            .xsmall()
+                            .icon(if filter.descending {
+                                IconName::ArrowDown
+                            } else {
+                                IconName::ArrowUp
+                            })
+                            .tooltip("Reverse the order")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.filter.descending = !this.filter.descending;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("status-filter")
+                            .ghost()
+                            .xsmall()
+                            .label(format!("Show: {}", filter.status.label()))
+                            .tooltip("Show new clips, edited ones or both")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.filter.status = this.filter.status.next();
+                                cx.notify();
+                            })),
+                    ),
+            )
+    }
+
     pub(super) fn render_library(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let count = self.clips.len();
+        let theme = cx.theme().clone();
+        let total = self.clips.len();
+        let show_clips = self.filter.status != StatusFilter::Edited;
+        let show_settled = self.filter.status != StatusFilter::New;
+        let count = if show_clips {
+            self.visible(List::Clips, cx).len()
+        } else {
+            0
+        };
         v_flex()
             .w(px(PANEL_WIDTH))
             .flex_none()
@@ -49,16 +137,32 @@ impl PlicApp {
                             .text_color(theme.muted_foreground)
                             .child("CLIPS"),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(count.to_string()),
-                    ),
+                    .child(div().text_xs().text_color(theme.muted_foreground).child(
+                        if count == total {
+                            count.to_string()
+                        } else {
+                            format!("{count} of {total}")
+                        },
+                    )),
             )
+            .child(self.render_filter_bar(cx))
             .map(|panel| {
-                if count == 0 {
+                if !show_clips {
+                    return panel.child(div().flex_1());
+                }
+                if total == 0 {
                     return panel.child(self.render_empty_library(cx));
+                }
+                if count == 0 {
+                    return panel.child(
+                        div()
+                            .flex_1()
+                            .p_6()
+                            .text_center()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child("No clips match the search."),
+                    );
                 }
                 panel.child(
                     div()
@@ -73,7 +177,7 @@ impl PlicApp {
                         .child(Scrollbar::vertical(&self.list_scroll)),
                 )
             })
-            .when(!self.settled.is_empty(), |panel| {
+            .when(show_settled && !self.settled.is_empty(), |panel| {
                 panel.child(self.render_settled(cx))
             })
     }
@@ -81,8 +185,9 @@ impl PlicApp {
     /// The collapsible list of originals already exported, at the bottom.
     fn render_settled(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let count = self.settled.len();
-        let open = self.settled_open;
+        let count = self.visible(List::Settled, cx).len();
+        // Looking only at edited clips has nothing else to show.
+        let open = self.settled_open || self.filter.status == StatusFilter::Edited;
         let height = px(ROW_HEIGHT * (count as f32).min(SETTLED_VISIBLE_ROWS) + 4.);
         v_flex()
             .flex_none()
@@ -212,12 +317,14 @@ impl PlicApp {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let theme = cx.theme().clone();
+        let rows = self.visible(list, cx);
         let (entries, selected_index, id) = match list {
             List::Clips => (&self.clips, self.selected, "clip"),
             List::Settled => (&self.settled, self.settled_selected, "settled-clip"),
         };
         range
-            .filter_map(|index| {
+            .filter_map(|row| {
+                let index = *rows.get(row)?;
                 let entry = entries.get(index)?;
                 let selected = selected_index == Some(index);
                 let row = h_flex()

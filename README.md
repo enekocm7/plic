@@ -29,6 +29,9 @@ current directory the first time. The arrow next to **Open folder** lists
 recent folders. The window size and position, volume and theme are
 remembered too, in `state.json` next to `settings.json`.
 
+You can also drop a folder onto the window to open it, or a video file to open
+its folder with that clip selected. Dropped files are never moved.
+
 1. Pick a clip on the left. It starts in the viewer.
 2. Trim it by dragging the yellow handles on the timeline, by pressing
    `I` and `O` at the playhead, or by typing the times in the export panel.

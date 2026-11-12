@@ -5197,6 +5197,7 @@ dependencies = [
  "futures",
  "gpui-kit",
  "image",
+ "notify",
  "open",
  "rtrb",
  "serde",

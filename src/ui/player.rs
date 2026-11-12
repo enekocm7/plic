@@ -25,6 +25,7 @@ use super::{
 use crate::{
     audio::AudioOutput,
     ffmpeg::{self, CropRect, FrameSize, MediaInfo},
+    markers::Markers,
     playback::{MAX_FRAME_RATE, Playback},
     timestamp,
     trim::{self, Segments, TrimRange},
@@ -32,6 +33,8 @@ use crate::{
 };
 
 /// Decode size used before the viewer has been laid out.
+/// How long the mouse rests before fullscreen hides the controls.
+const CONTROLS_IDLE: Duration = Duration::from_secs(2);
 const DEFAULT_VIEWPORT: FrameSize = FrameSize::new(1280, 720);
 
 /// How long the viewport must stay the same size before playback restarts
@@ -142,6 +145,7 @@ pub struct Player {
     drag: Option<Drag>,
     error: Option<SharedString>,
     segments: Segments,
+    markers: Markers,
     /// False for clips that are only viewed, such as exported originals.
     trimmable: bool,
     looping: bool,
@@ -160,6 +164,10 @@ pub struct Player {
     audio: AudioDevice,
     volume: f32,
     muted: bool,
+    /// Whether the viewer fills the window, with the controls tucked away.
+    fullscreen: bool,
+    /// When the mouse last moved over the viewer, for hiding the controls.
+    last_activity: Instant,
     /// Whether the volume slider is being dragged.
     pub(super) dragging_volume: bool,
 }
@@ -183,6 +191,7 @@ impl Player {
             drag: None,
             error: None,
             segments: Segments::default(),
+            markers: Markers::default(),
             trimmable: true,
             looping: false,
             crop: None,
@@ -196,6 +205,8 @@ impl Player {
             audio: AudioDevice::Unopened,
             volume,
             muted: false,
+            fullscreen: false,
+            last_activity: Instant::now(),
             dragging_volume: false,
         }
     }
@@ -265,6 +276,7 @@ impl Player {
         self.drag = None;
         self.resume_after_drag = false;
         self.segments = Segments::default();
+        self.markers = Markers::default();
         self.waveform = None;
         self.stale_frames.extend(self.frame.take());
     }
@@ -404,6 +416,34 @@ impl Player {
             position + interval * frames as u32
         };
         self.seek(target, window, cx);
+    }
+
+    pub fn set_fullscreen(&mut self, fullscreen: bool, cx: &mut Context<Self>) {
+        self.fullscreen = fullscreen;
+        if fullscreen {
+            self.wake_controls(cx);
+        }
+        cx.notify();
+    }
+
+    /// Shows the controls and hides them again once the mouse rests.
+    fn wake_controls(&mut self, cx: &mut Context<Self>) {
+        let was_hidden = !self.controls_visible();
+        self.last_activity = Instant::now();
+        if was_hidden {
+            cx.notify();
+        }
+        if self.fullscreen {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(CONTROLS_IDLE).await;
+                this.update(cx, |_, cx| cx.notify()).ok();
+            })
+            .detach();
+        }
+    }
+
+    fn controls_visible(&self) -> bool {
+        !self.fullscreen || self.last_activity.elapsed() < CONTROLS_IDLE
     }
 
     pub fn toggle_mute(&mut self, cx: &mut Context<Self>) {
@@ -552,6 +592,39 @@ impl Player {
         self.change_trim(TrimRange::new(start, Some(end)), cx);
     }
 
+    /// Drops a marker at the playhead, or removes the one there.
+    pub fn toggle_marker(&mut self, cx: &mut Context<Self>) {
+        if self.source.is_some() {
+            self.markers.toggle(self.position());
+            cx.notify();
+        }
+    }
+
+    pub fn jump_to_next_marker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(time) = self.markers.next_after(self.position()) {
+            self.seek(time, window, cx);
+        }
+    }
+
+    pub fn jump_to_previous_marker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(time) = self.markers.previous_before(self.position()) {
+            self.seek(time, window, cx);
+        }
+    }
+
+    /// Trims to the markers around the playhead: the one before it starts
+    /// the clip and the one after it ends it. Without a marker on a side,
+    /// that end of the clip is used.
+    pub fn trim_between_markers(&mut self, cx: &mut Context<Self>) {
+        if self.source.is_none() {
+            return;
+        }
+        let at = self.position();
+        let start = self.markers.previous_before(at).unwrap_or(Duration::ZERO);
+        let end = self.markers.next_after(at);
+        self.change_trim(TrimRange::new(start, end), cx);
+    }
+
     pub fn reset_trim(&mut self, cx: &mut Context<Self>) {
         self.change_trim(TrimRange::default(), cx);
     }
@@ -631,6 +704,7 @@ impl Player {
             waveform: self.waveform.clone(),
             hover: self.visible_hover().map(|hover| hover.at),
             drag: self.drag,
+            markers: self.markers.times().to_vec(),
             aspect_ratio: self
                 .source
                 .as_ref()
@@ -1209,12 +1283,18 @@ impl Render for Player {
             window.drop_image(frame).ok();
         }
         let (background, border) = (cx.theme().background, cx.theme().border);
+        let controls = self.source.is_some() && self.controls_visible();
         v_flex()
             .size_full()
             .bg(background)
+            .on_mouse_move(cx.listener(|this, _, _, cx| {
+                if this.fullscreen {
+                    this.wake_controls(cx);
+                }
+            }))
             .child(self.render_stage(cx))
             // Controls only make sense with something to control.
-            .when(self.source.is_some(), |player| {
+            .when(controls, |player| {
                 player.child(
                     v_flex()
                         .flex_none()

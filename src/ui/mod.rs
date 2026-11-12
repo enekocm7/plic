@@ -2,6 +2,7 @@
 
 mod app;
 mod clip_actions;
+mod clip_filter;
 mod editor;
 mod frame_image;
 mod jobs;
@@ -36,6 +37,12 @@ actions!(
         JumpToStart,
         JumpToEnd,
         ToggleMute,
+        ToggleMarker,
+        NextMarker,
+        PreviousMarker,
+        TrimToMarkers,
+        ToggleFullscreen,
+        ExitFullscreen,
         MarkIn,
         MarkOut,
         ResetTrim,
@@ -75,6 +82,12 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("home", JumpToStart, shortcuts),
         KeyBinding::new("end", JumpToEnd, shortcuts),
         KeyBinding::new("m", ToggleMute, shortcuts),
+        KeyBinding::new("b", ToggleMarker, shortcuts),
+        KeyBinding::new("]", NextMarker, shortcuts),
+        KeyBinding::new("[", PreviousMarker, shortcuts),
+        KeyBinding::new("shift-b", TrimToMarkers, shortcuts),
+        KeyBinding::new("f", ToggleFullscreen, shortcuts),
+        KeyBinding::new("escape", ExitFullscreen, shortcuts),
         KeyBinding::new("i", MarkIn, shortcuts),
         KeyBinding::new("o", MarkOut, shortcuts),
         KeyBinding::new("shift-i", JumpToIn, shortcuts),
@@ -85,6 +98,7 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("r", ToggleLoop, shortcuts),
         KeyBinding::new("delete", DeleteClip, shortcuts),
         KeyBinding::new("?", ShowShortcuts, shortcuts),
+        KeyBinding::new("f11", ToggleFullscreen, Some(CONTEXT)),
         KeyBinding::new("f1", ShowShortcuts, Some(CONTEXT)),
         KeyBinding::new("ctrl-,", ShowSettings, Some(CONTEXT)),
         // Works from inside the editor's text fields too.
