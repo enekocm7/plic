@@ -175,10 +175,11 @@ templates in `packaging/` by `packaging/render-manifests.ps1`. Then:
   release by hand.
 
 plic checks for a newer release when it starts, at most once every six
-hours, and shows a banner linking to the release page. Dismissing a version
+hours, and shows a banner. "Install update" downloads the installer, checks
+it against `SHA256SUMS.txt`, runs it silently and restarts plic on the new
+version. A portable copy opens the release page instead. Dismissing a version
 hides it until an even newer one is published; the download button in the
-title bar checks again by hand. Nothing is downloaded or installed
-automatically.
+title bar checks again by hand.
 
 To build the installer locally, install [Inno Setup](https://jrsoftware.org/isinfo.php)
 and run:
