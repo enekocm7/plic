@@ -173,7 +173,7 @@ To build the installer locally, install [Inno Setup](https://jrsoftware.org/isin
 
 ```sh
 cargo build --release
-iscc /DAppVersion=0.8.2 installer\plic.iss
+iscc /DAppVersion=0.9.0 installer\plic.iss
 ```
 
 The result lands in `target/dist/`.
