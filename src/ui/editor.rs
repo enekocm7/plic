@@ -34,8 +34,13 @@ use super::app::{ClipEntry, ClipStatus, PlicApp, display_name};
 use super::library_panel::format_size;
 use super::{AddSegment, SplitAtPlayhead};
 use crate::{
-    ffmpeg::{self, Animation, Codec, CropAspect, ExportMode, Format, Transform},
-    library, timestamp,
+    ffmpeg::{
+        self, Animation, AudioAdjust, Codec, CropAspect, ExportMode, Format, OutputLimits,
+        Transform, VideoEncoding,
+    },
+    library,
+    state::{ExportFolds, ExportSection},
+    timestamp,
     trim::{self, TrimRange},
 };
 
@@ -110,6 +115,9 @@ pub struct Editor {
     pub(super) animation: Animation,
     /// Whether several segments become one file or one file each.
     pub(super) join: bool,
+    /// Which sections are folded. Read from app state once, kept here so a
+    /// render does not have to clone the whole state on every frame.
+    folds: ExportFolds,
     /// Keyframe at or before a clip's start, by clip and requested start.
     keyframes: HashMap<(PathBuf, Duration), Keyframe>,
     /// Whether a keyframe lookup is running. Only one runs at a time; the
@@ -181,6 +189,7 @@ impl Editor {
             format: Format::default(),
             animation: Animation::default(),
             join: true,
+            folds: crate::state::get().export_folds,
             keyframes: HashMap::new(),
             keyframe_pending: false,
             _subscriptions: subscriptions,
@@ -190,6 +199,101 @@ impl Editor {
     /// The output name as typed, without surrounding whitespace.
     pub fn name(&self, cx: &App) -> String {
         self.name.read(cx).value().trim().to_owned()
+    }
+}
+
+/// The frame edits that differ from the source, in the order the panel
+/// lists them. The crop position only matters while a crop is applied.
+fn frame_changes(transform: Transform) -> Vec<String> {
+    let mut parts = Vec::new();
+    if let Some(aspect) = transform.crop {
+        parts.push(format!("cropped {}", aspect.label()));
+        if (transform.crop_position - 0.5).abs() > 0.005 {
+            let percent = (transform.crop_position * 100.0).round() as i32;
+            parts.push(format!("crop at {percent}%"));
+        }
+    }
+    let degrees = transform.rotation.degrees();
+    if degrees != 0 {
+        parts.push(format!("rotated {degrees}°"));
+    }
+    match (transform.flip_horizontal, transform.flip_vertical) {
+        (true, true) => parts.push("flipped both ways".into()),
+        (true, false) => parts.push("flipped horizontally".into()),
+        (false, true) => parts.push("flipped vertically".into()),
+        (false, false) => {}
+    }
+    parts
+}
+
+/// The audio choices that differ from keeping every track untouched, in a
+/// clip with `tracks` tracks of which `kept` are exported.
+fn audio_changes(tracks: usize, kept: usize, adjust: AudioAdjust) -> Vec<String> {
+    let mut parts = Vec::new();
+    if kept != tracks {
+        parts.push(match kept {
+            0 => "No audio".to_owned(),
+            1 => "1 track".to_owned(),
+            count => format!("{count} tracks mixed"),
+        });
+    }
+    if adjust.gain_db.abs() >= 0.05 {
+        parts.push(format!("{:+.1} dB", adjust.gain_db));
+    }
+    if adjust.normalize {
+        parts.push("normalized".into());
+    }
+    parts
+}
+
+/// The encoding choices that differ from the defaults. Codec, caps and
+/// target size still apply once Lossless is switched off, so they stay
+/// listed while it is on. `video.quality` is set in the settings dialog,
+/// not in this panel.
+fn quality_changes(
+    lossless: bool,
+    video: VideoEncoding,
+    limits: OutputLimits,
+    format: Format,
+    animation: Animation,
+) -> Vec<String> {
+    if format.is_animation() {
+        let default = Animation::default();
+        let mut parts = Vec::new();
+        if animation.width != default.width {
+            parts.push(format!("{} px", animation.width));
+        }
+        if animation.fps != default.fps {
+            parts.push(format!("{} fps", animation.fps));
+        }
+        return parts;
+    }
+    let mut parts = Vec::new();
+    if lossless {
+        parts.push("Lossless".into());
+    }
+    if video.codec != Codec::default() {
+        parts.push(video.codec.label().into());
+    }
+    if let Some(lines) = limits.max_lines {
+        parts.push(format!("{lines}p"));
+    }
+    if let Some(fps) = limits.max_fps {
+        parts.push(format!("{fps} fps"));
+    }
+    if let Some(bytes) = video.target_size {
+        parts.push(format!("{} MB", bytes / (1024 * 1024)));
+    }
+    parts
+}
+
+/// A one-line header summary, and whether the section holds any non-default
+/// values. `fallback` describes the unchanged state.
+fn fold_summary(parts: Vec<String>, fallback: &str) -> (SharedString, bool) {
+    if parts.is_empty() {
+        (fallback.to_owned().into(), false)
+    } else {
+        (parts.join(" · ").into(), true)
     }
 }
 
@@ -717,6 +821,145 @@ impl PlicApp {
         cx.notify();
     }
 
+    /// Folds or unfolds a section, remembering the choice across clips and
+    /// restarts. The state file is written right away; failing to write it
+    /// only loses the choice on the next run.
+    fn toggle_section(&mut self, section: ExportSection, cx: &mut Context<Self>) {
+        self.editor.folds.toggle(section);
+        let folds = self.editor.folds;
+        crate::state::update(|state| state.export_folds = folds);
+        crate::state::save();
+        cx.notify();
+    }
+
+    /// A section header that folds its body. Non-default values are listed
+    /// beside the title and marked with a dot, so a folded section cannot
+    /// hide a forgotten setting.
+    fn render_section(
+        &self,
+        section: ExportSection,
+        changes: Vec<String>,
+        fallback: &str,
+        action: Option<AnyElement>,
+        body: AnyElement,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let folded = self.editor.folds.is_folded(section);
+        let (summary, changed) = fold_summary(changes, fallback);
+        let header = h_flex()
+            .id(SharedString::from(format!(
+                "export-section-{}",
+                section.label()
+            )))
+            .h(px(28.))
+            .pl_1()
+            .gap_1p5()
+            .rounded(theme.radius)
+            .cursor_pointer()
+            .text_color(theme.muted_foreground)
+            .hover(|row| row.bg(theme.list_hover).text_color(theme.foreground))
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle_section(section, cx)))
+            .child(
+                Icon::new(if folded {
+                    IconName::ChevronRight
+                } else {
+                    IconName::ChevronDown
+                })
+                .small(),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(section.label()),
+            )
+            .when(changed, |row| {
+                row.child(
+                    div()
+                        .w(px(6.))
+                        .h(px(6.))
+                        .flex_none()
+                        .rounded_full()
+                        .bg(theme.primary),
+                )
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_xs()
+                    .text_color(if changed {
+                        theme.primary
+                    } else {
+                        theme.muted_foreground
+                    })
+                    .child(summary),
+            )
+            .when_some(action, |row, action| row.child(action));
+        v_flex()
+            .gap_1p5()
+            .child(header)
+            .when(!folded, |column| column.child(body))
+            .into_any_element()
+    }
+
+    /// The Frame section: crop, rotation and flips.
+    fn render_frame_section(&self, entry: &ClipEntry, cx: &mut Context<Self>) -> AnyElement {
+        let transform = entry.transform;
+        let reset = (!transform.is_identity()
+            && !self.editor.folds.is_folded(ExportSection::Frame))
+        .then(|| {
+            Button::new("reset-frame")
+                .ghost()
+                .xsmall()
+                .label("Reset")
+                .on_click(cx.listener(|this, _, window, cx| {
+                    // The header folds on click; this button must not.
+                    cx.stop_propagation();
+                    this.change_transform(|transform| *transform = Transform::identity(), cx);
+                    this.editor
+                        .crop_position
+                        .update(cx, |slider, cx| slider.set_value(0.5, window, cx));
+                }))
+                .into_any_element()
+        });
+        // Type-erase the body before passing `cx` again: an `impl IntoElement`
+        // would carry a borrow of `cx` into the call under Rust 2024's
+        // lifetime capture rules.
+        let body = self.render_frame_controls(entry, cx).into_any_element();
+        self.render_section(
+            ExportSection::Frame,
+            frame_changes(transform),
+            "Full frame",
+            reset,
+            body,
+            cx,
+        )
+    }
+
+    /// The Audio section: which tracks are kept, gain and normalization.
+    fn render_audio_section(&self, entry: &ClipEntry, cx: &mut Context<Self>) -> AnyElement {
+        let tracks = entry.info().map_or(0, |info| info.audio_tracks.len());
+        let kept = entry.export_tracks().len();
+        let fallback = match (tracks, kept) {
+            (_, 0) => "No audio",
+            (1, _) => "Original sound",
+            (_, 1) => "One track",
+            _ => "Mixed into one track",
+        };
+        let body = self.render_audio_controls(entry, cx).into_any_element();
+        self.render_section(
+            ExportSection::Audio,
+            audio_changes(tracks, kept, entry.audio_adjust),
+            fallback,
+            None,
+            body,
+            cx,
+        )
+    }
+
     /// The segment list, with the active one highlighted, and the choice
     /// between one joined file and one file per segment.
     fn render_segments(&self, entry: &ClipEntry, cx: &mut Context<Self>) -> impl IntoElement {
@@ -944,34 +1187,6 @@ impl PlicApp {
 
         v_flex()
             .gap_1p5()
-            .child(
-                h_flex()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.muted_foreground)
-                            .child("Frame"),
-                    )
-                    .when(!transform.is_identity(), |row| {
-                        row.child(
-                            Button::new("reset-frame")
-                                .ghost()
-                                .xsmall()
-                                .label("Reset")
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.change_transform(
-                                        |transform| *transform = Transform::identity(),
-                                        cx,
-                                    );
-                                    this.editor
-                                        .crop_position
-                                        .update(cx, |slider, cx| slider.set_value(0.5, window, cx));
-                                })),
-                        )
-                    }),
-            )
             .child(h_flex().gap_0p5().children(crops))
             .when(transform.crop.is_some(), |column| {
                 column.child(
@@ -1117,12 +1332,6 @@ impl PlicApp {
             .map(|info| info.audio_tracks.clone())
             .unwrap_or_default();
         let kept = entry.export_tracks();
-        let summary = match (tracks.len(), kept.len()) {
-            (_, 0) => "No audio",
-            (1, _) => "Original sound",
-            (_, 1) => "One track",
-            _ => "Mixed into one track",
-        };
         let rows = tracks.iter().enumerate().map(|(index, track)| {
             let label = if tracks.len() == 1 {
                 "Keep the sound".to_string()
@@ -1139,23 +1348,6 @@ impl PlicApp {
         });
         v_flex()
             .gap_1p5()
-            .child(
-                h_flex()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.muted_foreground)
-                            .child("Audio"),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(summary),
-                    ),
-            )
             .children(rows)
             .when(!kept.is_empty(), |column| {
                 let adjust = entry.audio_adjust;
@@ -1634,6 +1826,42 @@ impl PlicApp {
                     ),
             );
 
+        // The Quality heading covers Lossless and the encoding rows, or the
+        // width and frame rate rows of an animated export. Folding it keeps
+        // those out of the way without hiding the format picker or the size
+        // summary, which live outside the section.
+        let quality_body = v_flex()
+            .gap_1p5()
+            .when(animated, |column| {
+                column.child(self.render_animation(enabled, cx))
+            })
+            .when(!animated, |column| {
+                column
+                    .child(mode_row)
+                    .children(snapped)
+                    .when(!lossless, |column| {
+                        column.child(self.render_encoding(enabled, length, with_audio, cx))
+                    })
+            });
+        let quality = self.render_section(
+            ExportSection::Quality,
+            quality_changes(
+                lossless,
+                self.editor.video,
+                self.editor.limits,
+                self.editor.format,
+                self.editor.animation,
+            ),
+            if animated {
+                "Default animation"
+            } else {
+                "Default encoding"
+            },
+            None,
+            quality_body.into_any_element(),
+            cx,
+        );
+
         let separate = segment_count > 1 && !self.editor.join;
         let output_preview = match (&destination, output_name.is_empty()) {
             (Some(folder), false) if separate => Some(format!(
@@ -1722,27 +1950,15 @@ impl PlicApp {
                             panel.child(self.render_segments(entry, cx))
                         })
                         .when_some(entry.filter(|_| enabled), |panel, entry| {
-                            panel.child(self.render_frame_controls(entry, cx))
+                            panel.child(self.render_frame_section(entry, cx))
                         })
                         .when_some(
                             entry.filter(|entry| {
                                 !animated && entry.info().is_some_and(|info| info.has_audio)
                             }),
-                            |panel, entry| panel.child(self.render_audio_controls(entry, cx)),
+                            |panel, entry| panel.child(self.render_audio_section(entry, cx)),
                         )
-                        .when(animated, |panel| {
-                            panel.child(self.render_animation(enabled, cx))
-                        })
-                        .when(!animated, |panel| {
-                            panel.child(v_flex().gap_1p5().child(mode_row).children(snapped).when(
-                                !lossless,
-                                |column| {
-                                    column.child(
-                                        self.render_encoding(enabled, length, with_audio, cx),
-                                    )
-                                },
-                            ))
-                        })
+                        .child(quality)
                         .child(self.render_format(enabled, cx))
                         .child(summary)
                         .child(
@@ -1829,5 +2045,101 @@ impl PlicApp {
             })
             .child(div().flex_1())
             .child(self.render_queue(cx))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // No glob here: `gpui_kit::*` exports its own `#[test]` attribute, which
+    // would shadow the built-in one in this module. Name the ffmpeg types
+    // directly too, since the GPUI glob also has `Transform` and `Animation`.
+    use super::{audio_changes, fold_summary, frame_changes, quality_changes};
+    use crate::ffmpeg::{
+        Animation, AudioAdjust, Codec, CropAspect, Format, OutputLimits, Transform, VideoEncoding,
+    };
+
+    #[test]
+    fn frame_summary_lists_only_changes() {
+        assert!(frame_changes(Transform::identity()).is_empty());
+        // The crop position does nothing until a crop is applied.
+        let mut uncut = Transform::identity();
+        uncut.crop_position = 0.2;
+        assert!(frame_changes(uncut).is_empty());
+
+        let mut edited = Transform::identity();
+        edited.crop = Some(CropAspect::Wide);
+        edited.crop_position = 0.25;
+        edited.rotation = edited.rotation.clockwise();
+        edited.flip_horizontal = true;
+        assert_eq!(
+            frame_changes(edited).join(" · "),
+            "cropped 16:9 · crop at 25% · rotated 90° · flipped horizontally"
+        );
+    }
+
+    #[test]
+    fn quality_summary_lists_only_changes() {
+        let defaults = (
+            VideoEncoding::default(),
+            OutputLimits::default(),
+            Animation::default(),
+        );
+        assert!(quality_changes(false, defaults.0, defaults.1, Format::Mp4, defaults.2).is_empty());
+
+        let video = VideoEncoding {
+            codec: Codec::Av1,
+            target_size: Some(25 * 1024 * 1024),
+            ..VideoEncoding::default()
+        };
+        let limits = OutputLimits {
+            max_lines: Some(720),
+            max_fps: Some(30),
+        };
+        assert_eq!(
+            quality_changes(false, video, limits, Format::Mp4, defaults.2).join(" · "),
+            "AV1 · 720p · 30 fps · 25 MB"
+        );
+        assert_eq!(
+            quality_changes(true, defaults.0, defaults.1, Format::Mp4, defaults.2).join(" · "),
+            "Lossless"
+        );
+
+        // GIF and WebP have their own encoding options; MP4's do not apply.
+        let animation = Animation {
+            width: 640,
+            fps: 24,
+        };
+        assert!(quality_changes(false, video, limits, Format::Gif, defaults.2).is_empty());
+        assert_eq!(
+            quality_changes(false, video, limits, Format::Webp, animation).join(" · "),
+            "640 px · 24 fps"
+        );
+    }
+
+    #[test]
+    fn audio_summary_lists_only_changes() {
+        assert!(audio_changes(2, 2, AudioAdjust::default()).is_empty());
+        assert_eq!(
+            audio_changes(2, 0, AudioAdjust::default()).join(" · "),
+            "No audio"
+        );
+        let adjust = AudioAdjust {
+            gain_db: 3.0,
+            normalize: true,
+        };
+        assert_eq!(
+            audio_changes(2, 1, adjust).join(" · "),
+            "1 track · +3.0 dB · normalized"
+        );
+    }
+
+    #[test]
+    fn unchanged_sections_fall_back_to_a_description() {
+        let (text, changed) = fold_summary(Vec::new(), "Full frame");
+        assert_eq!(text, "Full frame");
+        assert!(!changed);
+        let (text, changed) = fold_summary(vec!["AV1".into(), "720p".into()], "Defaults");
+        assert_eq!(text, "AV1 · 720p");
+        assert!(changed);
     }
 }
