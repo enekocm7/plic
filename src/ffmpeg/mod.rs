@@ -30,7 +30,7 @@ pub use frames::{
     frame_file_stem, keyframes, sampled_frames, save_frame,
 };
 pub use graph::{AudioAdjust, TARGET_LOUDNESS};
-pub use probe::{MediaInfo, Timing, keyframe_at_or_before, probe};
+pub use probe::{MediaInfo, Timing, keyframe_at_or_before, probe, video_end};
 pub use tools::Tool;
 pub use transform::{CropAspect, CropRect, OutputLimits, Transform};
 pub use waveform::{peaks as audio_peaks, resample as resample_peaks};
