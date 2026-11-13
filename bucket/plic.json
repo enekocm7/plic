@@ -1,12 +1,12 @@
 {
-    "version": "0.8.2",
+    "version": "0.9.0",
     "description": "Watch, trim and file away video clips.",
     "homepage": "https://github.com/enekocm7/plic",
     "license": "GPL-3.0-only",
     "architecture": {
         "64bit": {
-            "url": "https://github.com/enekocm7/plic/releases/download/v0.8.2/plic-0.8.2-windows-x64.zip",
-            "hash": "436b719c50058afe722342282ca24639b71a64b3f4ffd6f9f674fbac43103d23"
+            "url": "https://github.com/enekocm7/plic/releases/download/v0.9.0/plic-0.9.0-windows-x64.zip",
+            "hash": "91fe27d355242d334cffb0a0efe030b241f67e41c19b239dc285819bcc726200"
         }
     },
     "bin": "plic.exe",
