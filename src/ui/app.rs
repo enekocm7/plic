@@ -1045,7 +1045,14 @@ impl PlicApp {
     }
 
     fn show_shortcuts(&mut self, _: &ShowShortcuts, window: &mut Window, cx: &mut Context<Self>) {
-        shortcuts::open(window, cx);
+        let app = cx.entity().downgrade();
+        let on_customize: shortcuts::OnCustomize = std::rc::Rc::new(move |window, cx| {
+            app.update(cx, |app, cx| {
+                app.open_settings_at(super::settings_panel::Section::Keyboard, window, cx)
+            })
+            .ok();
+        });
+        shortcuts::open(on_customize, window, cx);
     }
 
     /// Opens what was dropped on the window: a folder replaces the library,
