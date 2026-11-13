@@ -1190,6 +1190,42 @@ fn export_keeps_picture_and_sound_together() {
     }
 }
 
+/// A stream copy can only stop the picture at a packet boundary; with
+/// B-frames those packets display frames past the requested out-point, while
+/// the sound stops closer to it. The export pads the sound to the picture's
+/// real end, so neither stream runs past the other by more than a frame.
+#[test]
+#[ignore]
+fn export_ends_picture_and_sound_together() {
+    let dir = bench_dir().join("exports");
+    fs::create_dir_all(&dir).unwrap();
+    for spec in [
+        SYNC_MARKS,
+        SYNC_MARKS_2997,
+        SYNC_AUDIO_LATE,
+        SYNC_VIDEO_LATE,
+    ] {
+        let fixture = sync_fixture(&spec);
+        let info = info_of(&fixture.path);
+        let frame = 1000.0 / info.frame_rate.unwrap_or(30.0);
+        for case in CASES.iter().filter(|case| case.mode == COPY) {
+            let output = dir.join("ends.mp4");
+            let _ = fs::remove_file(&output);
+            let request = request(&fixture.path, &output, &info, case);
+            ffmpeg::export(&request, &CancelToken::default(), |_| {}).unwrap();
+            let alignment = align(&output);
+            let _ = fs::remove_file(&output);
+            assert!(
+                alignment.end.abs() <= frame,
+                "{} {}: picture and sound end {:.1} ms apart, over {frame:.1} ms",
+                spec.name,
+                case.name,
+                alignment.end,
+            );
+        }
+    }
+}
+
 #[test]
 #[ignore]
 fn bench_export_sync() {

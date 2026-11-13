@@ -204,6 +204,38 @@ pub fn keyframe_at_or_before(path: &Path, at: Duration) -> Result<Duration> {
     parse_keyframe(&output.stdout, at)
 }
 
+/// The time the last video packet of `path` ends, on the container's clock.
+///
+/// A stream copy cannot stop the picture at the trim's out-point: with
+/// B-frames, packets whose presentation time is past it are still needed to
+/// show the last frames. The picture therefore runs to the end of the last
+/// packet, which can be several frames beyond the requested end. The
+/// container's `duration` does not report this; the packets do.
+pub fn video_end(path: &Path, frame_interval: Duration) -> Result<Duration> {
+    let output = crate::ffmpeg::command(crate::ffmpeg::Tool::Ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "packet=pts_time,duration_time",
+            "-print_format",
+            "json",
+        ])
+        .arg(path)
+        .no_window()
+        .stdin(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .context("could not start ffprobe; check that ffmpeg is installed and on PATH")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("ffprobe could not read the file: {}", stderr.trim());
+    }
+    parse_video_end(&output.stdout, frame_interval)
+}
+
 #[derive(Deserialize)]
 struct KeyframeOutput {
     #[serde(default)]
@@ -221,6 +253,40 @@ struct Packet {
 #[derive(Deserialize)]
 struct StreamStart {
     start_time: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct PacketOutput {
+    #[serde(default)]
+    packets: Vec<EndPacket>,
+}
+
+#[derive(Deserialize)]
+struct EndPacket {
+    pts_time: Option<String>,
+    duration_time: Option<String>,
+}
+
+/// The end of the last packet, falling back to one frame for packets that
+/// carry no duration (as some raw streams do).
+fn parse_video_end(json: &[u8], frame_interval: Duration) -> Result<Duration> {
+    let output: PacketOutput = serde_json::from_slice(json).context("unexpected ffprobe output")?;
+    let fallback = frame_interval.as_secs_f64();
+    let end = output
+        .packets
+        .iter()
+        .filter_map(|packet| {
+            let pts: f64 = packet.pts_time.as_deref()?.parse().ok()?;
+            let duration = packet
+                .duration_time
+                .as_deref()
+                .and_then(|text| text.parse().ok())
+                .unwrap_or(fallback);
+            Some(pts + duration)
+        })
+        .reduce(f64::max)
+        .context("the export has no video packets")?;
+    Ok(Duration::from_secs_f64(end.max(0.0)))
 }
 
 fn parse_keyframe(json: &[u8], at: Duration) -> Result<Duration> {
@@ -438,6 +504,33 @@ mod tests {
 
         let no_keyframe = br#"{"packets": [{"pts_time": "2.5", "flags": "___"}], "streams": []}"#;
         assert!(parse_keyframe(no_keyframe, at).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn measures_the_end_of_the_last_video_packet() -> Result<()> {
+        let interval = Duration::from_secs_f64(1.0 / 60.0);
+        let json = br#"{
+            "packets": [
+                {"pts_time": "0.000000", "duration_time": "0.016667"},
+                {"pts_time": "0.016667", "duration_time": "0.016667"},
+                {"pts_time": "16.066667", "duration_time": "0.016667"}
+            ]
+        }"#;
+        let end = parse_video_end(json, interval)?;
+        assert!((end.as_secs_f64() - 16.083334).abs() < 0.000_001);
+        // The last packet in decode order need not be the last one shown.
+        let reordered = br#"{
+            "packets": [
+                {"pts_time": "16.066667", "duration_time": "0.016667"},
+                {"pts_time": "16.000000", "duration_time": "0.016667"}
+            ]
+        }"#;
+        assert_eq!(parse_video_end(reordered, interval)?, end);
+        // Without a duration on the packets, one frame stands in for it.
+        let bare = br#"{"packets": [{"pts_time": "1.983333"}]}"#;
+        assert!((parse_video_end(bare, interval)?.as_secs_f64() - 2.0).abs() < 0.000_001);
+        assert!(parse_video_end(br#"{"packets": []}"#, interval).is_err());
         Ok(())
     }
 

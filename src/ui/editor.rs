@@ -1717,7 +1717,11 @@ impl PlicApp {
                             .and_then(Codec::from_name),
                         source_audio_tracks: info.map_or(0, |info| info.audio_tracks.len()),
                         audio_tracks,
-                        audio_reencoded: audio_tracks > 1 || entry.audio_adjust.filter().is_some(),
+                        // A lossless cut copies the picture but pads the
+                        // sound to the picture's end, so it encodes that too.
+                        audio_reencoded: lossless
+                            || audio_tracks > 1
+                            || entry.audio_adjust.filter().is_some(),
                     }))
                 }),
         };
@@ -1726,7 +1730,7 @@ impl PlicApp {
         } else if target.is_some() {
             "Encoded to fit this size"
         } else if lossless {
-            "Copied as-is: the original's bitrate over the kept length"
+            "Picture copied as-is at the original's bitrate; sound re-encoded to end with it"
         } else {
             "Estimated from the original's bitrate, scaled for the resolution, frame rate, \
              codec and quality"

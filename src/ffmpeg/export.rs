@@ -149,8 +149,9 @@ pub struct SizeInputs {
     pub source_audio_tracks: usize,
     /// Audio streams kept in the export, mixed into one.
     pub audio_tracks: usize,
-    /// Whether copied sound still has to be encoded, as mixing several
-    /// tracks or adjusting the level does.
+    /// Whether the sound is encoded even though the picture is copied:
+    /// mixing several tracks, adjusting the level, or padding a lossless
+    /// cut to the picture's real end.
     pub audio_reencoded: bool,
 }
 
@@ -396,13 +397,47 @@ pub fn export(
             };
             let parts = if list.is_some() { &copy_parts } else { &parts };
             let start = if list.is_some() { CUT_SHARE } else { 0.0 };
-            run(
-                parts.stream_copy(list.as_deref()),
-                Output::File(&temporary),
-                cancel,
-                expected,
-                |fraction| on_progress(start + (1.0 - start) * fraction),
-            )?;
+            if audio.is_silent() {
+                run(
+                    parts.stream_copy(list.as_deref()),
+                    Output::File(&temporary),
+                    cancel,
+                    expected,
+                    |fraction| on_progress(start + (1.0 - start) * fraction),
+                )?;
+            } else {
+                // A stream copy stops the picture at a packet boundary, which
+                // with B-frames is later than the sound's out-point: the file
+                // would end with a moment of silent picture. Copy into an
+                // intermediate, measure where the picture really ends, then
+                // pad (or trim) the sound to that instant so both streams
+                // finish together. Only the sound is encoded again.
+                let copy = create_temp_path(output, request.format.extension())?;
+                let _copy_guard = OwnedTempFile(copy.clone());
+                run(
+                    parts.stream_copy(list.as_deref()),
+                    Output::File(&copy),
+                    cancel,
+                    expected,
+                    |fraction| on_progress(start + (COPY_SHARE - start) * fraction),
+                )?;
+                let frame_interval = Duration::from_secs_f64(
+                    1.0 / request
+                        .frame_rate
+                        .filter(|rate| *rate > 0.0)
+                        .unwrap_or(30.0),
+                );
+                let picture_end = super::video_end(&copy, frame_interval)
+                    .context("could not measure where the copied picture ends")?;
+                let end = picture_end + AUDIO_PAD_MARGIN;
+                run(
+                    parts.pad_audio(&copy, end),
+                    Output::File(&temporary),
+                    cancel,
+                    Some(end),
+                    |fraction| on_progress(COPY_SHARE + (1.0 - COPY_SHARE) * fraction),
+                )?;
+            }
         }
     }
 
@@ -416,9 +451,14 @@ pub fn export(
 /// Audio bitrate of re-encoded sound when no target size squeezes it.
 const DEFAULT_AUDIO_BITRATE: u64 = 192_000;
 
-/// The share of a lossless join's progress spent cutting its segments;
-/// joining them takes the rest.
+/// A hair of silence past the picture's end, so rounding in the container's
+/// timestamps can never leave the sound short of it.
+const AUDIO_PAD_MARGIN: Duration = Duration::from_millis(4);
+
+/// The share of a lossless join's progress spent cutting its segments; the
+/// copy takes the middle, and padding the sound takes the rest.
 const CUT_SHARE: f32 = 0.1;
+const COPY_SHARE: f32 = 0.9;
 
 /// The share of a target size left for the streams; the rest covers the
 /// container and the encoder overshooting a little.
@@ -515,6 +555,22 @@ impl Parts<'_> {
                 .args(["-map", "[a]", "-c:a", "aac", "-b:a"])
                 .arg(audio_bitrate.to_string());
         }
+        command
+    }
+
+    /// Keeps the copied picture from `copy` and extends the sound with
+    /// silence (or trims it) to `end`, so the two streams end together.
+    /// `apad` makes the sound endless and `-t:a` stops it at the picture's
+    /// real end; the video is only remuxed.
+    fn pad_audio(&self, copy: &Path, end: Duration) -> Command {
+        let mut command = base_command();
+        command
+            .arg("-i")
+            .arg(copy)
+            .args(["-map", "0:v:0", "-c:v", "copy"])
+            .args(["-map", "0:a:0", "-af", "apad", "-c:a", "aac", "-b:a"])
+            .arg(DEFAULT_AUDIO_BITRATE.to_string())
+            .args(["-t:a", &seconds_arg(end)]);
         command
     }
 
@@ -1154,6 +1210,53 @@ mod tests {
                 "make_zero",
             ]
         );
+    }
+
+    #[test]
+    fn pads_only_the_sound_of_a_stream_copy() {
+        let request = ExportRequest {
+            source: PathBuf::from("source.mp4"),
+            output: PathBuf::from("out.mp4"),
+            ranges: vec![TrimRange::new(Duration::ZERO, None)],
+            mode: ExportMode::StreamCopy,
+            video: VideoEncoding::default(),
+            source_duration: None,
+            audio_tracks: vec![0],
+            audio_adjust: AudioAdjust::default(),
+            video_size: None,
+            transform: Transform::default(),
+            limits: OutputLimits::default(),
+            frame_rate: Some(60.0),
+            format: Format::Mp4,
+            animation: Animation::default(),
+        };
+        let parts = Parts {
+            request: &request,
+            ranges: &request.ranges,
+            audio: AudioPlan {
+                tracks: &request.audio_tracks,
+                chain: None,
+            },
+            video_filter: None,
+        };
+        let command = parts.pad_audio(Path::new("copy.mp4"), Duration::from_millis(16_087));
+        let args: Vec<&str> = command
+            .get_args()
+            .map(|arg| arg.to_str().unwrap())
+            .collect();
+        for pair in [
+            ["-i", "copy.mp4"],
+            ["-map", "0:v:0"],
+            ["-c:v", "copy"],
+            ["-map", "0:a:0"],
+            ["-af", "apad"],
+            ["-t:a", "16.087"],
+        ] {
+            assert!(
+                args.windows(2).any(|window| window == pair),
+                "missing {pair:?}"
+            );
+        }
     }
 
     #[test]
