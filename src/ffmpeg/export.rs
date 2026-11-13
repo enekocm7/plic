@@ -367,24 +367,41 @@ pub fn export(
             }
         }
         ExportMode::StreamCopy => {
-            // Kept alive until ffmpeg is done with it.
+            // Kept alive until ffmpeg is done with them.
+            let mut _segments = None;
             let mut _concat_list = None;
             let list = if ranges.len() > 1 {
+                let segments = cut_segments(request, &ranges, cancel, &mut on_progress)?;
                 let list = create_temp_path(output, "txt")?;
-                fs::write(&list, concat_list(&request.source, &ranges))
+                fs::write(&list, concat_list(&segments.0))
                     .with_context(|| format!("could not write {}", list.display()))?;
                 _concat_list = Some(OwnedTempFile(list.clone()));
+                _segments = Some(segments);
                 Some(list)
             } else {
                 None
             };
-            let command = parts.stream_copy(list.as_deref());
+            // A join reads the intermediate files, which keep only the chosen
+            // audio tracks, numbered from zero. A single range reads the
+            // source itself, where the original track numbers apply.
+            let copy_tracks: Vec<usize> = (0..request.audio_tracks.len()).collect();
+            let copy_parts = Parts {
+                request,
+                ranges: &ranges,
+                audio: AudioPlan {
+                    tracks: &copy_tracks,
+                    chain: audio_filter.as_deref(),
+                },
+                video_filter: video_filter.as_deref(),
+            };
+            let parts = if list.is_some() { &copy_parts } else { &parts };
+            let start = if list.is_some() { CUT_SHARE } else { 0.0 };
             run(
-                command,
+                parts.stream_copy(list.as_deref()),
                 Output::File(&temporary),
                 cancel,
                 expected,
-                &mut on_progress,
+                |fraction| on_progress(start + (1.0 - start) * fraction),
             )?;
         }
     }
@@ -398,6 +415,10 @@ pub fn export(
 
 /// Audio bitrate of re-encoded sound when no target size squeezes it.
 const DEFAULT_AUDIO_BITRATE: u64 = 192_000;
+
+/// The share of a lossless join's progress spent cutting its segments;
+/// joining them takes the rest.
+const CUT_SHARE: f32 = 0.1;
 
 /// The share of a target size left for the streams; the rest covers the
 /// container and the encoder overshooting a little.
@@ -497,8 +518,8 @@ impl Parts<'_> {
         command
     }
 
-    /// A stream copy of one range, or of several through the concat
-    /// demuxer script at `list`.
+    /// A stream copy of one range, or of several pre-cut segments through
+    /// the concat demuxer script at `list`.
     fn stream_copy(&self, list: Option<&Path>) -> Command {
         let mut command = base_command();
         match (list, self.ranges) {
@@ -650,20 +671,72 @@ fn add_input(command: &mut Command, request: &ExportRequest, range: TrimRange) {
     command.arg("-i").arg(&request.source);
 }
 
-/// A concat demuxer script that plays `ranges` of `source` back to back.
-fn concat_list(source: &Path, ranges: &[TrimRange]) -> String {
+/// Stream-copies one range into a file of its own. Cutting it separately
+/// lets ffmpeg normalize the segment's timestamps: its first picture and
+/// sound both start at zero, including the reordering delay of B-frames.
+/// The concat demuxer can then join these files from their durations,
+/// without any packets straddling a join.
+///
+/// Asking it to cut the same source several times with `inpoint`/`outpoint`
+/// instead leaves pre-roll packets at every join. Their timestamps go
+/// backwards (a B-frame's DTS leads its PTS), and the muxer repairs the
+/// non-monotonic DTS by nudging the picture and sound apart by a frame or
+/// more, which is the drift this avoids.
+fn segment_command(request: &ExportRequest, range: TrimRange) -> Command {
+    let mut command = base_command();
+    add_input(&mut command, request, range);
+    command.args(["-map", "0:v:0"]);
+    // Only the tracks the export keeps, in the same order: the concat
+    // demuxer numbers them from zero on its input.
+    for &track in &request.audio_tracks {
+        command.arg("-map").arg(format!("0:a:{track}"));
+    }
+    command.args(["-c", "copy", "-avoid_negative_ts", "make_zero"]);
+    command
+}
+
+/// Cuts the pieces of a lossless join, kept alive until the join is done.
+fn cut_segments(
+    request: &ExportRequest,
+    ranges: &[TrimRange],
+    cancel: &CancelToken,
+    on_progress: &mut impl FnMut(f32),
+) -> Result<Segments, ExportError> {
+    // Reserved up front so an early failure still removes them all.
+    let mut segments = Segments(Vec::with_capacity(ranges.len()));
+    for _ in ranges {
+        segments.0.push(create_temp_path(
+            &request.output,
+            request.format.extension(),
+        )?);
+    }
+    for (index, (&range, path)) in ranges.iter().zip(&segments.0).enumerate() {
+        if cancel.is_cancelled() {
+            return Err(ExportError::Cancelled);
+        }
+        run(
+            segment_command(request, range),
+            Output::File(path),
+            cancel,
+            range.length(request.source_duration),
+            |fraction| {
+                on_progress(CUT_SHARE * (index as f32 + fraction) / ranges.len() as f32);
+            },
+        )?;
+    }
+    Ok(segments)
+}
+
+/// A concat demuxer script that plays `segments` back to back. Their own
+/// durations place them on the timeline, so a `duration` line would only
+/// guess at what the file already knows and put the joins out of sync.
+fn concat_list(segments: &[PathBuf]) -> String {
     // Paths are single-quoted; a quote inside one is closed, escaped and
     // reopened.
-    let path = source.to_string_lossy().replace('\'', r"'\''");
     let mut list = String::from("ffconcat version 1.0\n");
-    for range in ranges {
+    for segment in segments {
+        let path = segment.to_string_lossy().replace('\'', r"'\''");
         list.push_str(&format!("file '{path}'\n"));
-        if !range.start.is_zero() {
-            list.push_str(&format!("inpoint {}\n", seconds_arg(range.start)));
-        }
-        if let Some(end) = range.end {
-            list.push_str(&format!("outpoint {}\n", seconds_arg(end)));
-        }
     }
     list
 }
@@ -707,6 +780,17 @@ struct OwnedTempFile(PathBuf);
 impl Drop for OwnedTempFile {
     fn drop(&mut self) {
         remove_temporary(&self.0);
+    }
+}
+
+/// The intermediate files of a lossless join, removed when dropped.
+struct Segments(Vec<PathBuf>);
+
+impl Drop for Segments {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            remove_temporary(path);
+        }
     }
 }
 
@@ -1002,20 +1086,73 @@ mod tests {
     }
 
     #[test]
-    fn writes_a_concat_list_with_quoted_paths() {
-        let s = Duration::from_secs;
-        let list = concat_list(
-            Path::new("C:/clips/it's.mp4"),
-            &[
-                TrimRange::new(s(0), Some(s(5))),
-                TrimRange::new(s(10), None),
-            ],
-        );
+    fn writes_a_concat_list_of_segments_with_quoted_paths() {
+        let list = concat_list(&[
+            PathBuf::from("C:/clips/it's.mp4"),
+            PathBuf::from("C:/clips/part 2.mp4"),
+        ]);
         assert_eq!(
             list,
             "ffconcat version 1.0\n\
-             file 'C:/clips/it'\\''s.mp4'\noutpoint 5.000\n\
-             file 'C:/clips/it'\\''s.mp4'\ninpoint 10.000\n"
+             file 'C:/clips/it'\\''s.mp4'\n\
+             file 'C:/clips/part 2.mp4'\n"
+        );
+        // The files' own durations place them on the timeline.
+        assert!(!list.contains("duration"));
+        assert!(!list.contains("inpoint"));
+        assert!(!list.contains("outpoint"));
+    }
+
+    #[test]
+    fn a_segment_is_cut_with_its_own_timestamps() {
+        let request = ExportRequest {
+            source: PathBuf::from("clip.mkv"),
+            output: PathBuf::from("out.mp4"),
+            ranges: vec![TrimRange::new(
+                Duration::from_secs(2),
+                Some(Duration::from_secs(7)),
+            )],
+            mode: ExportMode::StreamCopy,
+            video: VideoEncoding::default(),
+            source_duration: None,
+            audio_tracks: vec![0, 2],
+            audio_adjust: AudioAdjust::default(),
+            video_size: None,
+            transform: Transform::default(),
+            limits: OutputLimits::default(),
+            frame_rate: None,
+            format: Format::Mp4,
+            animation: Animation::default(),
+        };
+        let args: Vec<String> = segment_command(&request, request.ranges[0])
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostats",
+                "-y",
+                "-ss",
+                "2.000",
+                "-t",
+                "5.000",
+                "-i",
+                "clip.mkv",
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a:0",
+                "-map",
+                "0:a:2",
+                "-c",
+                "copy",
+                "-avoid_negative_ts",
+                "make_zero",
+            ]
         );
     }
 
