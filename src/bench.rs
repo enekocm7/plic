@@ -986,6 +986,17 @@ const CASES: &[Case] = &[
         normalize: false,
         max_fps: None,
     },
+    // The joined pieces keep only the chosen tracks, so their numbers move;
+    // mixing two of them exercises those numbers in the audio graph.
+    Case {
+        name: "copy join x3 2 tracks +3dB",
+        ranges: JOIN,
+        mode: COPY,
+        tracks: &[0, 1],
+        gain_db: 3.0,
+        normalize: false,
+        max_fps: None,
+    },
 ];
 
 fn request(source: &Path, output: &Path, info: &MediaInfo, case: &Case) -> ExportRequest {
@@ -1140,23 +1151,26 @@ fn align(path: &Path) -> Alignment {
     }
 }
 
-/// Exports that re-encode, and a lossless cut of one range, keep every
-/// flash within a frame (plus 5 ms) of its beep. Lossless joins are left
-/// out: they can only start on keyframes, and with B-frames the picture of
-/// every piece after the first lags by the reorder delay.
+/// Every export, including lossless joins of three or eight pieces, keeps
+/// each flash within a frame (plus 5 ms) of its beep, on every fixture.
+/// A lossless join can only start on keyframes; with B-frames its pieces
+/// have to be cut separately so the reorder delay does not leave the
+/// picture lagging the sound after each join.
 #[test]
 #[ignore]
 fn export_keeps_picture_and_sound_together() {
     let dir = bench_dir().join("exports");
     fs::create_dir_all(&dir).unwrap();
-    for spec in [SYNC_MARKS_2997, SYNC_AUDIO_LATE, SYNC_VIDEO_LATE] {
+    for spec in [
+        SYNC_MARKS,
+        SYNC_MARKS_2997,
+        SYNC_AUDIO_LATE,
+        SYNC_VIDEO_LATE,
+    ] {
         let fixture = sync_fixture(&spec);
         let info = info_of(&fixture.path);
         let rate = info.frame_rate.unwrap_or(30.0);
-        for case in CASES
-            .iter()
-            .filter(|case| case.mode == REENCODE || case.name == "copy single")
-        {
+        for case in CASES {
             let output = dir.join("checked.mp4");
             let _ = fs::remove_file(&output);
             let request = request(&fixture.path, &output, &info, case);
