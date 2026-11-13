@@ -1699,8 +1699,6 @@ impl PlicApp {
                             }),
                             |panel, entry| panel.child(self.render_audio_controls(entry, cx)),
                         )
-                        .child(summary)
-                        .child(self.render_format(enabled, cx))
                         .when(animated, |panel| {
                             panel.child(self.render_animation(enabled, cx))
                         })
@@ -1714,6 +1712,8 @@ impl PlicApp {
                                 },
                             ))
                         })
+                        .child(self.render_format(enabled, cx))
+                        .child(summary)
                         .child(
                             v_flex()
                                 .gap_1p5()
