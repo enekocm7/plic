@@ -58,19 +58,16 @@ impl PlicApp {
             Ok(found) => {
                 updates::mark_checked();
                 match found {
+                    // A version the user dismissed stays hidden from the
+                    // automatic check, but asking by hand offers it again.
                     Some(update)
                         if updates::dismissed().as_deref() == Some(update.version.as_str()) =>
                     {
-                        self.update = None;
                         if manual {
-                            window.push_notification(
-                                Notification::info(format!(
-                                    "plic {} is available, but you dismissed it.",
-                                    update.version
-                                ))
-                                .title("Update available"),
-                                cx,
-                            );
+                            updates::forget_dismissal();
+                            self.update = Some(update);
+                        } else {
+                            self.update = None;
                         }
                     }
                     Some(update) => self.update = Some(update),
@@ -121,7 +118,7 @@ impl PlicApp {
         let Some(update) = self.update.clone() else {
             return;
         };
-        if update.installer.is_none() || update.checksums.is_none() || !updates::is_installed() {
+        if update.installer.is_none() || !updates::is_installed() {
             self.open_release_page(&ClickEvent::default(), window, cx);
             return;
         }

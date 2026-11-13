@@ -34,9 +34,10 @@ pub struct Update {
     pub version: String,
     /// The release page, which carries the notes and the downloads.
     pub url: String,
-    /// The installer asset and the checksum list published next to it, when
-    /// the release carries them.
+    /// The installer asset, when the release carries one.
     pub installer: Option<Download>,
+    /// The `SHA256SUMS.txt` list, used when GitHub does not report the
+    /// installer's own digest.
     pub checksums: Option<Download>,
 }
 
@@ -45,6 +46,9 @@ pub struct Update {
 pub struct Download {
     pub name: String,
     pub url: String,
+    /// The lowercase hex SHA-256 GitHub computed for the file, when it
+    /// reports one.
+    pub sha256: Option<String>,
 }
 
 /// What the user has chosen about update checks, kept between runs.
@@ -56,6 +60,12 @@ pub fn dismissed() -> Option<String> {
 pub fn dismiss(version: &str) {
     let version = version.to_string();
     crate::state::update(|state| state.dismissed_update = Some(version));
+    crate::state::save();
+}
+
+/// Offers a dismissed version again, as when the user checks by hand.
+pub fn forget_dismissal() {
+    crate::state::update(|state| state.dismissed_update = None);
     crate::state::save();
 }
 
@@ -118,6 +128,17 @@ struct Release {
 struct Asset {
     name: String,
     browser_download_url: String,
+    /// `sha256:<hex>`, computed by GitHub when the asset was uploaded.
+    #[serde(default)]
+    digest: Option<String>,
+}
+
+impl Asset {
+    fn sha256(&self) -> Option<String> {
+        let hex = self.digest.as_deref()?.strip_prefix("sha256:")?;
+        (hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .then(|| hex.to_ascii_lowercase())
+    }
 }
 
 impl Release {
@@ -128,6 +149,7 @@ impl Release {
             .map(|asset| Download {
                 name: asset.name.clone(),
                 url: asset.browser_download_url.clone(),
+                sha256: asset.sha256(),
             })
     }
 
@@ -203,10 +225,11 @@ pub fn is_installed() -> bool {
         .is_some_and(|uninstaller| uninstaller.is_file())
 }
 
-/// Downloads the installer for `update`, checks it against the release's
-/// `SHA256SUMS.txt`, and returns where it was saved.
+/// Downloads the installer for `update`, checks its SHA-256 against the
+/// digest GitHub reports (or the release's `SHA256SUMS.txt`), and returns
+/// where it was saved.
 pub fn download(update: &Update) -> Result<PathBuf> {
-    let (Some(installer), Some(checksums)) = (&update.installer, &update.checksums) else {
+    let Some(installer) = &update.installer else {
         bail!("this release has no installer to download");
     };
     let agent: ureq::Agent = ureq::Agent::config_builder()
@@ -215,15 +238,21 @@ pub fn download(update: &Update) -> Result<PathBuf> {
         .build()
         .into();
 
-    let sums = agent
-        .get(&checksums.url)
-        .call()
-        .context("could not download the checksum list")?
-        .body_mut()
-        .read_to_string()
-        .context("could not read the checksum list")?;
-    let expected = expected_checksum(&sums, &installer.name)
-        .with_context(|| format!("no checksum is published for {}", installer.name))?;
+    let expected = match (&installer.sha256, &update.checksums) {
+        (Some(digest), _) => digest.clone(),
+        (None, Some(checksums)) => {
+            let sums = agent
+                .get(&checksums.url)
+                .call()
+                .context("could not download the checksum list")?
+                .body_mut()
+                .read_to_string()
+                .context("could not read the checksum list")?;
+            expected_checksum(&sums, &installer.name)
+                .with_context(|| format!("no checksum is published for {}", installer.name))?
+        }
+        (None, None) => bail!("no checksum is published for {}", installer.name),
+    };
 
     let dir = std::env::temp_dir().join(format!("plic-update-{}", update.version));
     fs::create_dir_all(&dir).context("could not create a folder for the download")?;
@@ -363,13 +392,41 @@ mod tests {
     }
 
     #[test]
+    fn reads_the_digest_github_reports() {
+        let hex = "27b7f3cc31d72db7b41e46a7f09cc8dba606d52cffc727de5a8db722eb2a06b7";
+        let json = format!(
+            r#"{{"tag_name":"v0.9.0","assets":[
+            {{"name":"plic-0.9.0-setup.exe","browser_download_url":"https://x/setup",
+              "digest":"sha256:{}"}},
+            {{"name":"plic-0.9.0.zip","browser_download_url":"https://x/zip","digest":null}},
+            {{"name":"other","browser_download_url":"https://x/o","digest":"md5:abc"}}]}}"#,
+            hex.to_ascii_uppercase()
+        );
+        let release: Release = serde_json::from_str(&json).expect("valid release JSON");
+        let setup = release
+            .asset(|n| n.ends_with("-setup.exe"))
+            .expect("installer");
+        assert_eq!(setup.sha256.as_deref(), Some(hex));
+        assert_eq!(
+            release
+                .asset(|n| n.ends_with(".zip"))
+                .and_then(|d| d.sha256),
+            None
+        );
+        assert_eq!(release.asset(|n| n == "other").and_then(|d| d.sha256), None);
+    }
+
+    #[test]
     fn reads_checksums_from_a_sums_file() {
         let sums = "ABC123  plic-0.9.0-setup.exe\r\nff00 *other.zip\n";
         assert_eq!(
             expected_checksum(sums, "plic-0.9.0-setup.exe").as_deref(),
             Some("abc123")
         );
-        assert_eq!(expected_checksum(sums, "other.zip").as_deref(), Some("ff00"));
+        assert_eq!(
+            expected_checksum(sums, "other.zip").as_deref(),
+            Some("ff00")
+        );
         assert_eq!(expected_checksum(sums, "missing.exe"), None);
     }
 
