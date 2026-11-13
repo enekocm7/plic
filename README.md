@@ -91,6 +91,7 @@ previews the frame, and the audio waveform makes a shout or a shot easy to find.
 - **File size:** pick 10, 25, 50 or 100 MB and plic encodes in two passes to land just under it.
 - **GIF / WebP:** short silent loops, with an estimated size.
 - **Lossless:** copies the video as is. The cut snaps to the keyframe at or before your start, and the panel shows where.
+- **Sections:** fold Frame, Audio or Quality to keep the panel short. Folded headers list any changed settings with a dot, and the choice is remembered next time.
 - **Queue:** exports run in the background; the "At once" buttons set how many run together.
 
 ### Batch

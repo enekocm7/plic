@@ -23,6 +23,52 @@ pub struct WindowRect {
     pub maximized: bool,
 }
 
+/// A section of the export panel the user can fold away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportSection {
+    Frame,
+    Audio,
+    Quality,
+}
+
+impl ExportSection {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Frame => "Frame",
+            Self::Audio => "Audio",
+            Self::Quality => "Quality",
+        }
+    }
+}
+
+/// Which export panel sections are folded. Remembered across clips and runs;
+/// the app writes it, so it belongs here rather than in the settings file.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExportFolds {
+    frame: bool,
+    audio: bool,
+    quality: bool,
+}
+
+impl ExportFolds {
+    pub fn is_folded(self, section: ExportSection) -> bool {
+        match section {
+            ExportSection::Frame => self.frame,
+            ExportSection::Audio => self.audio,
+            ExportSection::Quality => self.quality,
+        }
+    }
+
+    pub fn toggle(&mut self, section: ExportSection) {
+        match section {
+            ExportSection::Frame => self.frame = !self.frame,
+            ExportSection::Audio => self.audio = !self.audio,
+            ExportSection::Quality => self.quality = !self.quality,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct State {
@@ -38,6 +84,8 @@ pub struct State {
     /// Exports saved straight into a clips folder, so they are not offered
     /// as recordings to edit. Oldest first.
     pub root_exports: Vec<PathBuf>,
+    /// Export panel sections the user has folded.
+    pub export_folds: ExportFolds,
 }
 
 impl Default for State {
@@ -50,6 +98,7 @@ impl Default for State {
             dismissed_update: None,
             last_update_check: None,
             root_exports: Vec::new(),
+            export_folds: ExportFolds::default(),
         }
     }
 }
@@ -168,5 +217,34 @@ mod tests {
         let state: State = serde_json::from_str(r#"{"volume": 0.3}"#).unwrap();
         assert_eq!(state.volume, 0.3);
         assert!(state.dark_theme);
+        assert_eq!(state.export_folds, ExportFolds::default());
+    }
+
+    #[test]
+    fn folded_sections_toggle_independently() {
+        let mut folds = ExportFolds::default();
+        for section in [
+            ExportSection::Frame,
+            ExportSection::Audio,
+            ExportSection::Quality,
+        ] {
+            assert!(!folds.is_folded(section));
+        }
+        folds.toggle(ExportSection::Quality);
+        assert!(folds.is_folded(ExportSection::Quality));
+        assert!(!folds.is_folded(ExportSection::Frame));
+        folds.toggle(ExportSection::Quality);
+        assert!(!folds.is_folded(ExportSection::Quality));
+    }
+
+    #[test]
+    fn folded_sections_survive_a_round_trip() {
+        let state: State =
+            serde_json::from_str(r#"{"export_folds":{"frame":true,"quality":true}}"#).unwrap();
+        assert!(state.export_folds.is_folded(ExportSection::Frame));
+        assert!(!state.export_folds.is_folded(ExportSection::Audio));
+        assert!(state.export_folds.is_folded(ExportSection::Quality));
+        let written = serde_json::to_string(&state).unwrap();
+        assert_eq!(serde_json::from_str::<State>(&written).unwrap(), state);
     }
 }
