@@ -23,7 +23,7 @@ use anyhow::{Context, Result, bail};
 
 use super::{
     Animation, CommandExt as _, Format, FrameSize, OutputLimits, Transform,
-    encoder::{self, VideoEncoding},
+    encoder::{self, Codec, VideoEncoding},
     graph::{self, AudioAdjust, AudioPlan},
     seconds_arg, transform,
 };
@@ -124,15 +124,110 @@ impl From<anyhow::Error> for ExportError {
     }
 }
 
-/// Roughly how large an export of `length` from a source of `source_bytes`
-/// and `source_duration` will be. Exports are encoded at constant quality,
-/// so the source's average bitrate is the best cheap guess.
-pub fn estimated_size(source_bytes: u64, source_duration: Duration, length: Duration) -> u64 {
-    if source_duration.is_zero() {
+/// The source and the options an export is made with, for [`estimated_size`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SizeInputs {
+    /// Size of the source file, in bytes.
+    pub source_bytes: u64,
+    /// Length of the whole source.
+    pub source_duration: Duration,
+    /// Length of what is kept.
+    pub length: Duration,
+    pub mode: ExportMode,
+    /// Codec and quality of a re-encoded export.
+    pub video: VideoEncoding,
+    pub transform: Transform,
+    /// Caps on the output's size and frame rate.
+    pub limits: OutputLimits,
+    /// Display size of the source, with its rotation already applied.
+    pub source_size: Option<FrameSize>,
+    /// Frame rate of the source.
+    pub source_frame_rate: Option<f64>,
+    /// Codec of the source, assumed to be H.264 when unknown.
+    pub source_codec: Option<Codec>,
+    /// Every audio stream of the source.
+    pub source_audio_tracks: usize,
+    /// Audio streams kept in the export, mixed into one.
+    pub audio_tracks: usize,
+    /// Whether copied sound still has to be encoded, as mixing several
+    /// tracks or adjusting the level does.
+    pub audio_reencoded: bool,
+}
+
+/// Roughly how large an export will be.
+///
+/// Exports are encoded at constant quality, so the source's average bitrate
+/// is the starting point. The picture's share of it is scaled by how many
+/// pixels and frames the output keeps, and by how much better the chosen
+/// codec and quality compress; the sound is counted apart, since it does not
+/// shrink with the picture. A stream copy keeps the source's picture as it
+/// is, so only its sound choices matter.
+pub fn estimated_size(inputs: &SizeInputs) -> u64 {
+    if inputs.source_duration.is_zero() {
         return 0;
     }
-    let fraction = (length.as_secs_f64() / source_duration.as_secs_f64()).clamp(0.0, 1.0);
-    (source_bytes as f64 * fraction).round() as u64
+    let fraction =
+        (inputs.length.as_secs_f64() / inputs.source_duration.as_secs_f64()).clamp(0.0, 1.0);
+    let kept = inputs.source_bytes as f64 * fraction;
+    let seconds = inputs.length.as_secs_f64();
+    // A source track is assumed to weigh what one exported AAC track does.
+    let track_bytes = DEFAULT_AUDIO_BITRATE as f64 / 8.0 * seconds;
+    let source_audio = (inputs.source_audio_tracks as f64 * track_bytes).min(kept);
+    let video = (kept - source_audio).max(0.0);
+
+    let audio = if inputs.audio_tracks == 0 {
+        0.0
+    } else if inputs.mode == ExportMode::StreamCopy && !inputs.audio_reencoded {
+        // Copied tracks keep the bitrate they had in the source.
+        source_audio * inputs.audio_tracks as f64 / inputs.source_audio_tracks.max(1) as f64
+    } else {
+        // Encoded sound is mixed into one track at a known bitrate.
+        track_bytes
+    };
+
+    let video = match inputs.mode {
+        // A stream copy leaves the picture untouched.
+        ExportMode::StreamCopy => video,
+        ExportMode::Reencode => {
+            let source_codec = inputs.source_codec.unwrap_or(Codec::H264);
+            video
+                * pixel_factor(inputs)
+                * frame_rate_factor(inputs)
+                * (inputs.video.codec.efficiency() / source_codec.efficiency())
+                * inputs.video.quality.bitrate_factor(inputs.video.codec)
+        }
+    };
+    (video + audio).round() as u64
+}
+
+/// The share of the source's pixels the output keeps, after cropping,
+/// rotating and downscaling.
+fn pixel_factor(inputs: &SizeInputs) -> f64 {
+    let Some(source) = inputs.source_size else {
+        return 1.0;
+    };
+    let source_pixels = f64::from(source.width) * f64::from(source.height);
+    if source_pixels <= 0.0 {
+        return 1.0;
+    }
+    let output = inputs.transform.output_size(source);
+    let output = inputs.limits.scaled_size(output).unwrap_or(output);
+    let output_pixels = f64::from(output.width) * f64::from(output.height);
+    (output_pixels / source_pixels).clamp(0.0, 1.0)
+}
+
+/// The share of the source's frames the output keeps. A cap never adds
+/// frames, and an unknown rate is taken to be the usual 30 fps.
+fn frame_rate_factor(inputs: &SizeInputs) -> f64 {
+    let source = inputs.source_frame_rate.unwrap_or(30.0);
+    if source <= 0.0 {
+        return 1.0;
+    }
+    let output = inputs
+        .limits
+        .max_fps
+        .map_or(source, |cap| source.min(f64::from(cap)));
+    (output / source).clamp(0.0, 1.0)
 }
 
 /// Runs ffmpeg for `request`, calling `on_progress` with a fraction in
@@ -702,17 +797,208 @@ fn publish(temporary: &Path, output: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ffmpeg::CropAspect;
+
+    /// A minute of 1080p60 H.264 with no sound, exported unchanged.
+    fn inputs() -> SizeInputs {
+        SizeInputs {
+            source_bytes: 60 * MB_U64,
+            source_duration: Duration::from_secs(60),
+            length: Duration::from_secs(60),
+            mode: ExportMode::Reencode,
+            video: VideoEncoding::default(),
+            transform: Transform::identity(),
+            limits: OutputLimits::default(),
+            source_size: Some(FrameSize::new(1920, 1080)),
+            source_frame_rate: Some(60.0),
+            source_codec: Some(Codec::H264),
+            source_audio_tracks: 0,
+            audio_tracks: 0,
+            audio_reencoded: false,
+        }
+    }
+
+    const MB_U64: u64 = 1024 * 1024;
 
     #[test]
     fn estimates_size_from_the_source_bitrate() {
-        let mb = 1024 * 1024;
         let minute = Duration::from_secs(60);
+        let full = estimated_size(&inputs());
+        assert_eq!(full, 60 * MB_U64);
         assert_eq!(
-            estimated_size(60 * mb, minute, Duration::from_secs(15)),
-            15 * mb
+            estimated_size(&SizeInputs {
+                length: Duration::from_secs(15),
+                ..inputs()
+            }),
+            15 * MB_U64
         );
-        assert_eq!(estimated_size(60 * mb, minute, minute * 2), 60 * mb);
-        assert_eq!(estimated_size(60 * mb, Duration::ZERO, minute), 0);
+        assert_eq!(
+            estimated_size(&SizeInputs {
+                source_duration: Duration::ZERO,
+                ..inputs()
+            }),
+            0
+        );
+        // Keeping more than the source has still only keeps the source.
+        assert_eq!(
+            estimated_size(&SizeInputs {
+                length: minute * 2,
+                ..inputs()
+            }),
+            full
+        );
+    }
+
+    #[test]
+    fn downscaling_shrinks_the_estimate_by_the_pixels_kept() {
+        let full = estimated_size(&inputs());
+        let downscaled = SizeInputs {
+            limits: OutputLimits {
+                max_lines: Some(720),
+                max_fps: None,
+            },
+            ..inputs()
+        };
+        // 720p keeps 1280x720 of the source's 1920x1080 pixels.
+        assert_eq!(
+            estimated_size(&downscaled),
+            (full as f64 * (1280.0 * 720.0) / (1920.0 * 1080.0)).round() as u64
+        );
+        assert!(estimated_size(&downscaled) < full);
+        // Cropping to a vertical slice of the same height keeps fewer pixels too.
+        let cropped = SizeInputs {
+            transform: Transform {
+                crop: Some(CropAspect::Tall),
+                ..Transform::identity()
+            },
+            ..inputs()
+        };
+        assert!(estimated_size(&cropped) < full);
+    }
+
+    #[test]
+    fn capping_the_frame_rate_shrinks_the_estimate() {
+        let full = estimated_size(&inputs());
+        let capped = SizeInputs {
+            limits: OutputLimits {
+                max_lines: None,
+                max_fps: Some(30),
+            },
+            ..inputs()
+        };
+        assert_eq!(estimated_size(&capped), full / 2);
+        // A cap above the source's own rate changes nothing.
+        let no_op = SizeInputs {
+            limits: OutputLimits {
+                max_lines: None,
+                max_fps: Some(60),
+            },
+            ..inputs()
+        };
+        assert_eq!(estimated_size(&no_op), full);
+    }
+
+    #[test]
+    fn more_efficient_codecs_shrink_the_estimate() {
+        let full = estimated_size(&inputs());
+        let hevc = SizeInputs {
+            video: VideoEncoding {
+                codec: Codec::Hevc,
+                ..inputs().video
+            },
+            ..inputs()
+        };
+        let av1 = SizeInputs {
+            video: VideoEncoding {
+                codec: Codec::Av1,
+                ..inputs().video
+            },
+            ..inputs()
+        };
+        assert_eq!(estimated_size(&hevc), (full as f64 * 0.65).round() as u64);
+        assert!(estimated_size(&av1) < estimated_size(&hevc));
+        // An H.264 source in the same codec is not expected to shrink.
+        let already_hevc = SizeInputs {
+            source_codec: Some(Codec::Hevc),
+            ..hevc
+        };
+        assert_eq!(estimated_size(&already_hevc), full);
+    }
+
+    #[test]
+    fn the_quality_preset_changes_the_estimate() {
+        let full = estimated_size(&inputs());
+        let small = SizeInputs {
+            video: VideoEncoding {
+                quality: encoder::Quality::Small,
+                ..inputs().video
+            },
+            ..inputs()
+        };
+        let high = SizeInputs {
+            video: VideoEncoding {
+                quality: encoder::Quality::High,
+                ..inputs().video
+            },
+            ..inputs()
+        };
+        assert!(estimated_size(&small) < full);
+        assert!(estimated_size(&high) > full);
+    }
+
+    #[test]
+    fn sound_counts_apart_from_the_picture() {
+        // One track is re-encoded at the same bitrate it is assumed to have.
+        let with_sound = SizeInputs {
+            source_audio_tracks: 1,
+            audio_tracks: 1,
+            ..inputs()
+        };
+        assert_eq!(estimated_size(&with_sound), 60 * MB_U64);
+        // Dropping it removes its share.
+        let silent = SizeInputs {
+            audio_tracks: 0,
+            ..with_sound
+        };
+        assert!(estimated_size(&silent) < estimated_size(&with_sound));
+        // Mixing two tracks into one costs a single track worth of bits.
+        let two_tracks = SizeInputs {
+            source_audio_tracks: 2,
+            audio_tracks: 2,
+            audio_reencoded: true,
+            ..inputs()
+        };
+        assert!(estimated_size(&two_tracks) < 60 * MB_U64);
+    }
+
+    #[test]
+    fn a_stream_copy_keeps_the_sources_picture() {
+        let copy = SizeInputs {
+            mode: ExportMode::StreamCopy,
+            source_audio_tracks: 2,
+            audio_tracks: 2,
+            ..inputs()
+        };
+        assert_eq!(estimated_size(&copy), 60 * MB_U64);
+        // Size and codec options do not apply to a copy.
+        let ignored = SizeInputs {
+            limits: OutputLimits {
+                max_lines: Some(480),
+                max_fps: Some(30),
+            },
+            video: VideoEncoding {
+                codec: Codec::Av1,
+                ..inputs().video
+            },
+            ..copy
+        };
+        assert_eq!(estimated_size(&ignored), estimated_size(&copy));
+        // Half the sound tracks taken out is half the sound.
+        let one_track = SizeInputs {
+            audio_tracks: 1,
+            ..copy
+        };
+        assert!(estimated_size(&one_track) < 60 * MB_U64);
     }
 
     #[test]
