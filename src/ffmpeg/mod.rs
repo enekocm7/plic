@@ -22,7 +22,8 @@ use std::{
 pub use animation::{Animation, Format};
 pub use encoder::{Codec, Quality, VideoEncoding, uses_hardware, warm_up as warm_up_encoder};
 pub use export::{
-    CancelToken, ExportError, ExportMode, ExportRequest, estimated_size, export, target_bitrates,
+    CancelToken, ExportError, ExportMode, ExportRequest, SizeInputs, estimated_size, export,
+    target_bitrates,
 };
 pub use frames::{
     FrameSize, ImageFormat, RawFrame, VideoStream, extract_frame, extract_keyframe,

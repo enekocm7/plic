@@ -1477,7 +1477,8 @@ impl PlicApp {
             Some(others - active + effective)
         });
         // With a target size the file lands just under it; otherwise the
-        // source's bitrate is the best cheap guess.
+        // source's bitrate, scaled by what the options change, is the best
+        // cheap guess.
         let target = self.editor.video.target_size.filter(|_| !lossless);
         let animation_size = entry
             .and_then(|entry| entry.info()?.video_size.map(|size| (entry, size)))
@@ -1497,9 +1498,46 @@ impl PlicApp {
             None => entry
                 .zip(duration)
                 .zip(length)
-                .map(|((entry, duration), length)| {
-                    format_size(ffmpeg::estimated_size(entry.file.size, duration, length))
+                .map(|((entry, source_duration), length)| {
+                    let info = entry.info();
+                    let audio_tracks = entry.export_tracks().len();
+                    format_size(ffmpeg::estimated_size(&ffmpeg::SizeInputs {
+                        source_bytes: entry.file.size,
+                        source_duration,
+                        length,
+                        // A clip with a transform always re-encodes.
+                        mode: if lossless {
+                            ExportMode::StreamCopy
+                        } else {
+                            ExportMode::Reencode
+                        },
+                        // The export uses the quality from the settings.
+                        video: ffmpeg::VideoEncoding {
+                            quality: crate::settings::get().export_quality,
+                            ..self.editor.video
+                        },
+                        transform: entry.transform,
+                        limits: self.editor.limits,
+                        source_size: info.and_then(|info| info.video_size),
+                        source_frame_rate: info.and_then(|info| info.frame_rate),
+                        source_codec: info
+                            .and_then(|info| info.video_codec.as_deref())
+                            .and_then(Codec::from_name),
+                        source_audio_tracks: info.map_or(0, |info| info.audio_tracks.len()),
+                        audio_tracks,
+                        audio_reencoded: audio_tracks > 1 || entry.audio_adjust.filter().is_some(),
+                    }))
                 }),
+        };
+        let estimate_note = if animated {
+            "Estimated from the format, width and frame rate"
+        } else if target.is_some() {
+            "Encoded to fit this size"
+        } else if lossless {
+            "Copied as-is: the original's bitrate over the kept length"
+        } else {
+            "Estimated from the original's bitrate, scaled for the resolution, frame rate, \
+             codec and quality"
         };
         let with_audio = entry.is_some_and(|entry| !entry.export_tracks().is_empty());
         // One compact line: kept length, out of how much, and the likely size.
@@ -1540,14 +1578,7 @@ impl PlicApp {
                         .text_xs()
                         .text_color(theme.muted_foreground)
                         .child(format!("≈ {estimate}"))
-                        .tooltip(move |window, cx| {
-                            Tooltip::new(if target.is_some() {
-                                "Encoded to fit this size"
-                            } else {
-                                "Estimated from the original's bitrate"
-                            })
-                            .build(window, cx)
-                        }),
+                        .tooltip(move |window, cx| Tooltip::new(estimate_note).build(window, cx)),
                 )
             });
 

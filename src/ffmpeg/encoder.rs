@@ -37,6 +37,26 @@ impl Codec {
         }
     }
 
+    /// The codec ffprobe reports as `name`, if it is one of these.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "h264" | "avc1" => Some(Self::H264),
+            "hevc" | "h265" | "hev1" | "hvc1" => Some(Self::Hevc),
+            "av1" | "av01" => Some(Self::Av1),
+            _ => None,
+        }
+    }
+
+    /// Roughly the share of the bits an H.264 encode of the same quality
+    /// needs: each newer codec compresses better.
+    pub fn efficiency(self) -> f64 {
+        match self {
+            Self::H264 => 1.0,
+            Self::Hevc => 0.65,
+            Self::Av1 => 0.55,
+        }
+    }
+
     fn index(self) -> usize {
         match self {
             Self::H264 => 0,
@@ -96,6 +116,13 @@ impl Quality {
             Self::Balanced => "Balanced",
             Self::High => "High",
         }
+    }
+
+    /// Roughly how many times more bits this preset spends than Balanced.
+    /// On the constant-quality scales six steps halve the bitrate.
+    pub fn bitrate_factor(self, codec: Codec) -> f64 {
+        let balanced = Self::Balanced.level(codec) as f64;
+        2f64.powf((balanced - self.level(codec) as f64) / 6.0)
     }
 
     /// The constant-quality level for `codec`: CRF, CQ or QP depending on
