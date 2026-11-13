@@ -75,11 +75,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Compress-Archive -Path target\manifests\* -DestinationPath "$dist\plic-$version-manifests.zip" -Force
 
-          Push-Location $dist
-          Get-ChildItem -File -Exclude SHA256SUMS.txt | ForEach-Object {
-            "$((Get-FileHash $_.Name -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
-          } | Set-Content -Encoding ascii SHA256SUMS.txt
-          Pop-Location
+          # plic's updater and Scoop's autoupdate both read this list.
+          $sums = Join-Path (Resolve-Path $dist) SHA256SUMS.txt
+          Get-ChildItem -Path $dist -File |
+            Where-Object Name -ne SHA256SUMS.txt |
+            ForEach-Object {
+              "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+            } | Set-Content -Encoding ascii -Path $sums
+          if (-not (Test-Path $sums)) { Write-Error "SHA256SUMS.txt was not written"; exit 1 }
+          Get-Content $sums
 
       - name: Keep the manifests for the next jobs
         uses: actions/upload-artifact@v4
@@ -92,7 +96,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ github.ref_name }}" (Get-ChildItem target\dist -File).FullName `
+          $files = (Get-ChildItem target\dist -File).FullName
+          if (-not ($files | Where-Object { $_ -like '*SHA256SUMS.txt' })) {
+            Write-Error "SHA256SUMS.txt is missing from target\dist"
+            exit 1
+          }
+          gh release create "${{ github.ref_name }}" $files `
             --title "plic ${{ steps.version.outputs.version }}" `
             --generate-notes `
             --verify-tag
