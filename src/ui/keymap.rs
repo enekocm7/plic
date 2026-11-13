@@ -30,7 +30,9 @@ pub struct Command {
 }
 
 /// The headings commands are grouped under, in the order shown.
-pub const GROUPS: [&str; 3] = ["Playback", "Trimming", "Clips"];
+pub const GROUPS: [&str; 6] = [
+    "Playback", "Timeline", "Trimming", "Export", "Library", "App",
+];
 
 macro_rules! command {
     ($id:literal, $group:literal, $action:ident, $scope:ident, [$($key:literal),*], $description:literal) => {
@@ -63,14 +65,6 @@ pub const COMMANDS: &[Command] = &[
         "Seek back"
     ),
     command!(
-        "shuttle_backward",
-        "Playback",
-        ShuttleBackward,
-        Keys,
-        ["j"],
-        "Play backward; press again to go faster"
-    ),
-    command!(
         "seek_forward",
         "Playback",
         SeekForward,
@@ -79,36 +73,20 @@ pub const COMMANDS: &[Command] = &[
         "Seek forward"
     ),
     command!(
+        "shuttle_backward",
+        "Playback",
+        ShuttleBackward,
+        Keys,
+        ["j"],
+        "Play backward; press again to go faster"
+    ),
+    command!(
         "shuttle_forward",
         "Playback",
         ShuttleForward,
         Keys,
         ["l"],
         "Play forward; press again to go faster"
-    ),
-    command!(
-        "zoom_in",
-        "Playback",
-        ZoomIn,
-        Keys,
-        ["=", "+"],
-        "Zoom the timeline in"
-    ),
-    command!(
-        "zoom_out",
-        "Playback",
-        ZoomOut,
-        Keys,
-        ["-"],
-        "Zoom the timeline out"
-    ),
-    command!(
-        "zoom_to_fit",
-        "Playback",
-        ZoomToFit,
-        Keys,
-        ["0"],
-        "Show the whole clip on the timeline"
     ),
     command!(
         "step_backward",
@@ -142,38 +120,13 @@ pub const COMMANDS: &[Command] = &[
         ["end"],
         "End of the clip"
     ),
-    command!("toggle_mute", "Playback", ToggleMute, Keys, ["m"], "Mute"),
     command!(
-        "toggle_marker",
+        "toggle_mute",
         "Playback",
-        ToggleMarker,
+        ToggleMute,
         Keys,
-        ["b"],
-        "Add or remove a marker"
-    ),
-    command!(
-        "previous_marker",
-        "Playback",
-        PreviousMarker,
-        Keys,
-        ["["],
-        "Previous marker"
-    ),
-    command!(
-        "next_marker",
-        "Playback",
-        NextMarker,
-        Keys,
-        ["]"],
-        "Next marker"
-    ),
-    command!(
-        "trim_to_markers",
-        "Playback",
-        TrimToMarkers,
-        Keys,
-        ["shift-b"],
-        "Trim to the markers around the playhead"
+        ["m"],
+        "Mute or unmute"
     ),
     command!(
         "toggle_fullscreen",
@@ -190,6 +143,54 @@ pub const COMMANDS: &[Command] = &[
         Keys,
         ["escape"],
         "Leave fullscreen, or select just one clip again"
+    ),
+    command!(
+        "zoom_in",
+        "Timeline",
+        ZoomIn,
+        Keys,
+        ["=", "+"],
+        "Zoom the timeline in"
+    ),
+    command!(
+        "zoom_out",
+        "Timeline",
+        ZoomOut,
+        Keys,
+        ["-"],
+        "Zoom the timeline out"
+    ),
+    command!(
+        "zoom_to_fit",
+        "Timeline",
+        ZoomToFit,
+        Keys,
+        ["0"],
+        "Show the whole clip on the timeline"
+    ),
+    command!(
+        "toggle_marker",
+        "Timeline",
+        ToggleMarker,
+        Keys,
+        ["b"],
+        "Add or remove a marker"
+    ),
+    command!(
+        "previous_marker",
+        "Timeline",
+        PreviousMarker,
+        Keys,
+        ["["],
+        "Previous marker"
+    ),
+    command!(
+        "next_marker",
+        "Timeline",
+        NextMarker,
+        Keys,
+        ["]"],
+        "Next marker"
     ),
     command!(
         "mark_in",
@@ -256,32 +257,24 @@ pub const COMMANDS: &[Command] = &[
         "Loop the selection"
     ),
     command!(
-        "select_previous_clip",
-        "Clips",
-        SelectPreviousClip,
+        "trim_to_markers",
+        "Trimming",
+        TrimToMarkers,
         Keys,
-        ["up"],
-        "Previous clip"
-    ),
-    command!(
-        "select_next_clip",
-        "Clips",
-        SelectNextClip,
-        Keys,
-        ["down"],
-        "Next clip"
+        ["shift-b"],
+        "Trim to the markers around the playhead"
     ),
     command!(
         "export",
-        "Clips",
+        "Export",
         ExportClip,
         Window,
         ["ctrl-enter"],
-        "Export"
+        "Export the clip"
     ),
     command!(
         "copy_last_export",
-        "Clips",
+        "Export",
         CopyLastExport,
         Window,
         ["ctrl-shift-c"],
@@ -289,7 +282,7 @@ pub const COMMANDS: &[Command] = &[
     ),
     command!(
         "save_frame",
-        "Clips",
+        "Export",
         SaveFrame,
         Window,
         ["ctrl-shift-s"],
@@ -297,23 +290,47 @@ pub const COMMANDS: &[Command] = &[
     ),
     command!(
         "save_frame_jpeg",
-        "Clips",
+        "Export",
         SaveFrameJpeg,
         Window,
         ["ctrl-alt-s"],
         "Save the frame as JPEG"
     ),
     command!(
+        "select_previous_clip",
+        "Library",
+        SelectPreviousClip,
+        Keys,
+        ["up"],
+        "Previous clip"
+    ),
+    command!(
+        "select_next_clip",
+        "Library",
+        SelectNextClip,
+        Keys,
+        ["down"],
+        "Next clip"
+    ),
+    command!(
+        "select_all_clips",
+        "Library",
+        SelectAllClips,
+        Keys,
+        ["ctrl-a"],
+        "Select every clip in the list"
+    ),
+    command!(
         "delete_clip",
-        "Clips",
+        "Library",
         DeleteClip,
         Keys,
         ["delete"],
-        "Delete"
+        "Delete the clip"
     ),
     command!(
         "undo",
-        "Clips",
+        "Library",
         Undo,
         Keys,
         ["ctrl-z"],
@@ -321,23 +338,15 @@ pub const COMMANDS: &[Command] = &[
     ),
     command!(
         "redo",
-        "Clips",
+        "Library",
         Redo,
         Keys,
         ["ctrl-y", "ctrl-shift-z"],
         "Redo"
     ),
     command!(
-        "select_all_clips",
-        "Clips",
-        SelectAllClips,
-        Keys,
-        ["ctrl-a"],
-        "Select every clip in the list"
-    ),
-    command!(
         "open_folder",
-        "Clips",
+        "Library",
         OpenFolder,
         Window,
         ["ctrl-o"],
@@ -345,7 +354,7 @@ pub const COMMANDS: &[Command] = &[
     ),
     command!(
         "reload",
-        "Clips",
+        "Library",
         Reload,
         Window,
         ["f5", "ctrl-r"],
@@ -353,7 +362,7 @@ pub const COMMANDS: &[Command] = &[
     ),
     command!(
         "toggle_theme",
-        "Clips",
+        "App",
         ToggleTheme,
         Window,
         ["ctrl-t"],
@@ -361,25 +370,32 @@ pub const COMMANDS: &[Command] = &[
     ),
     command!(
         "show_settings",
-        "Clips",
+        "App",
         ShowSettings,
         Window,
         ["ctrl-,"],
-        "Settings"
+        "Open settings"
     ),
     command!(
         "show_shortcuts",
-        "Clips",
+        "App",
         ShowShortcuts,
         Keys,
         ["?"],
-        "Keyboard shortcuts"
+        "Show keyboard shortcuts"
     ),
-    command!("quit", "Clips", Quit, App, ["ctrl-q"], "Quit"),
+    command!("quit", "App", Quit, App, ["ctrl-q"], "Quit plic"),
 ];
 
-/// Bindings that are always there and cannot be changed: alternatives that
-/// keep working while a text field has focus.
+/// Keys that are always bound and cannot be changed, by command id:
+/// alternatives that keep working while a text field has focus.
+pub const FIXED: &[(&str, &str)] = &[
+    ("toggle_fullscreen", "f11"),
+    ("show_shortcuts", "f1"),
+    ("select_previous_clip", "ctrl-up"),
+    ("select_next_clip", "ctrl-down"),
+];
+
 fn fixed_bindings() -> Vec<KeyBinding> {
     vec![
         KeyBinding::new("f11", ToggleFullscreen, Some(CONTEXT)),
@@ -389,17 +405,89 @@ fn fixed_bindings() -> Vec<KeyBinding> {
     ]
 }
 
+/// The fixed keys of `command`.
+pub fn fixed_keys(command: &Command) -> impl Iterator<Item = &'static str> {
+    let id = command.id;
+    FIXED
+        .iter()
+        .filter(move |(fixed, _)| *fixed == id)
+        .map(|(_, keys)| *keys)
+}
+
+#[cfg(target_os = "macos")]
+const OS: OperatingSystem = OperatingSystem::Mac;
+#[cfg(not(target_os = "macos"))]
+const OS: OperatingSystem = OperatingSystem::Windows;
+
+/// The canonical spelling of a key sequence, so `Ctrl-S` and `ctrl-s`
+/// compare equal. `None` if it does not parse.
+pub fn normalize(keys: &str) -> Option<String> {
+    let strokes = parse_keys(keys)?;
+    Some(
+        strokes
+            .iter()
+            .map(|stroke| stroke.unparse(OS))
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+/// The other command, if any, that `keys` is already bound to, given the
+/// keys typed for each command. Fixed keys count too, since they cannot
+/// be moved.
+pub fn conflict<'a>(
+    command: &Command,
+    keys: &str,
+    bindings: impl IntoIterator<Item = (&'a Command, &'a [String])>,
+) -> Option<&'static str> {
+    let wanted = normalize(keys)?;
+    let taken_by_fixed = FIXED
+        .iter()
+        .find(|(id, fixed)| *id != command.id && normalize(fixed).as_ref() == Some(&wanted))
+        .and_then(|(id, _)| COMMANDS.iter().find(|other| other.id == *id));
+    if let Some(other) = taken_by_fixed {
+        return Some(other.description);
+    }
+    bindings
+        .into_iter()
+        .filter(|(other, _)| other.id != command.id)
+        .find(|(_, other_keys)| {
+            other_keys
+                .iter()
+                .any(|other| normalize(other).as_ref() == Some(&wanted))
+        })
+        .map(|(other, _)| other.description)
+}
+
 /// Parses a keystroke sequence such as `ctrl-shift-s` or `g g`.
 pub fn parse_keys(source: &str) -> Option<Vec<Keystroke>> {
-    #[cfg(target_os = "macos")]
-    const OS: OperatingSystem = OperatingSystem::Mac;
-    #[cfg(not(target_os = "macos"))]
-    const OS: OperatingSystem = OperatingSystem::Windows;
     let keystrokes: Option<Vec<_>> = source
         .split_whitespace()
         .map(|part| Keystroke::parse_with_os(part, OS).ok())
         .collect();
     keystrokes.filter(|keystrokes| !keystrokes.is_empty())
+}
+
+/// Splits keys typed in one field, such as `space, k`, into key sequences.
+/// A comma separates keys unless it is a key itself: at the start of a key
+/// (`,`) or after a modifier (`ctrl-,`).
+pub fn split_keys(text: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    let mut current = String::new();
+    for ch in text.chars() {
+        let token = current.trim();
+        if ch == ',' && !token.is_empty() && !token.ends_with('-') {
+            keys.push(token.to_owned());
+            current.clear();
+        } else {
+            current.push(ch);
+        }
+    }
+    let token = current.trim();
+    if !token.is_empty() {
+        keys.push(token.to_owned());
+    }
+    keys
 }
 
 /// Normalises a list of keys typed by the user: trims each, drops empty
@@ -500,7 +588,7 @@ pub fn apply(cx: &mut App) {
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{COMMANDS, clean_keys, keys_for, parse_keys};
+    use super::{COMMANDS, clean_keys, conflict, keys_for, normalize, parse_keys, split_keys};
 
     #[test]
     fn default_keys_parse_and_ids_are_unique() {
@@ -541,5 +629,51 @@ mod tests {
             Ok(vec!["ctrl-k".to_owned()])
         );
         assert!(clean_keys(&["foo-k".into()]).is_err());
+    }
+
+    #[test]
+    fn default_keys_do_not_conflict() {
+        let bindings: Vec<_> = COMMANDS
+            .iter()
+            .map(|command| {
+                let keys: Vec<String> = command.defaults.iter().map(|k| k.to_string()).collect();
+                (command, keys)
+            })
+            .collect();
+        for (command, keys) in &bindings {
+            for key in keys {
+                let others = bindings.iter().map(|(c, k)| (*c, k.as_slice()));
+                assert_eq!(conflict(command, key, others), None, "{key}");
+            }
+        }
+    }
+
+    #[test]
+    fn finds_conflicts_across_spellings() {
+        let play = COMMANDS.iter().find(|c| c.id == "toggle_play").unwrap();
+        let mute = COMMANDS.iter().find(|c| c.id == "toggle_mute").unwrap();
+        let mute_keys = vec!["m".to_owned()];
+        assert_eq!(normalize("shift-ctrl-s"), normalize("ctrl-shift-s"));
+        assert_eq!(
+            conflict(play, "m", [(mute, mute_keys.as_slice())]),
+            Some(mute.description)
+        );
+        // Fixed keys are taken too.
+        assert!(conflict(play, "f1", []).is_some());
+        assert_eq!(conflict(play, "p", [(mute, mute_keys.as_slice())]), None);
+    }
+
+    #[test]
+    fn splits_keys_and_keeps_commas_that_are_keys() {
+        assert_eq!(split_keys("space, k"), ["space", "k"]);
+        assert_eq!(split_keys(","), [","]);
+        assert_eq!(split_keys(", , x"), [",", "x"]);
+        assert_eq!(split_keys("ctrl-,"), ["ctrl-,"]);
+        assert_eq!(split_keys(" a ,, "), ["a", ","]);
+        assert!(split_keys("  ").is_empty());
+        // Every default survives being joined and split again.
+        for command in COMMANDS {
+            assert_eq!(split_keys(&command.defaults.join(", ")), command.defaults);
+        }
     }
 }
